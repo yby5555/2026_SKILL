@@ -1,0 +1,103 @@
+2026-04-30 17:36:23 [INFO] [启动] Fetch 版 Redis 任务消费者启动，browser_pool_size=2, contexts_per_browser=2, concurrent_workers=4
+2026-04-30 17:36:51 [INFO] [fetch-consumer-1][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 开始处理，priority=10, score=108222458188755.0, prompt='基于图片的这个人，生成半夜吵架的视频中文对话'
+2026-04-30 17:36:53 [ERROR] [fetch-consumer-1][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 第 1 次处理失败: Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py
+Traceback (most recent call last):
+  File "D:\2026_SKILL\flow\redis_task_video_fetch_consumer.py", line 173, in consumer_worker
+    local_path = await handle_single_task(scraper, task_collection, task)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\redis_task_video_fetch_consumer.py", line 134, in handle_single_task
+    raise raw_result
+  File "D:\2026_SKILL\driver_base\multi_browser_scraper_base\__init__.py", line 649, in _run_single_task
+    task = self.normalize_task(task_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\automation_video_v2_fetch_consumer.py", line 454, in normalize_task
+    raise RuntimeError("Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py")
+RuntimeError: Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py
+2026-04-30 17:36:53 [INFO] [fetch-consumer-1][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 任务已放回主队列重试，retry_count=1, priority=20, score=208222458186245
+2026-04-30 17:36:53 [INFO] [fetch-consumer-2][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 开始处理，priority=20, score=208222458186245.0, prompt='基于图片的这个人，生成半夜吵架的视频中文对话'
+2026-04-30 17:36:53 [ERROR] [fetch-consumer-2][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 第 2 次处理失败: Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py
+Traceback (most recent call last):
+  File "D:\2026_SKILL\flow\redis_task_video_fetch_consumer.py", line 173, in consumer_worker
+    local_path = await handle_single_task(scraper, task_collection, task)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\redis_task_video_fetch_consumer.py", line 134, in handle_single_task
+    raise raw_result
+  File "D:\2026_SKILL\driver_base\multi_browser_scraper_base\__init__.py", line 649, in _run_single_task
+    task = self.normalize_task(task_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\automation_video_v2_fetch_consumer.py", line 454, in normalize_task
+    raise RuntimeError("Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py")
+RuntimeError: Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py
+2026-04-30 17:36:53 [INFO] [fetch-consumer-2][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 任务已放回主队列重试，retry_count=2, priority=30, score=308222458186237
+2026-04-30 17:36:53 [INFO] [fetch-consumer-3][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 开始处理，priority=30, score=308222458186237.0, prompt='基于图片的这个人，生成半夜吵架的视频中文对话'
+2026-04-30 17:36:53 [ERROR] [fetch-consumer-3][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 第 3 次处理失败: Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py
+Traceback (most recent call last):
+  File "D:\2026_SKILL\flow\redis_task_video_fetch_consumer.py", line 173, in consumer_worker
+    local_path = await handle_single_task(scraper, task_collection, task)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\redis_task_video_fetch_consumer.py", line 134, in handle_single_task
+    raise raw_result
+  File "D:\2026_SKILL\driver_base\multi_browser_scraper_base\__init__.py", line 649, in _run_single_task
+    task = self.normalize_task(task_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\automation_video_v2_fetch_consumer.py", line 454, in normalize_task
+    raise RuntimeError("Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py")
+RuntimeError: Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py
+2026-04-30 17:36:53 [INFO] [fetch-consumer-3][任务:507d9535-7bcb-4a4f-b721-e4c5ad27fa0c] 达到最大重试次数，已标记为失败
+2026-04-30 17:38:30 [INFO] [启动] Fetch 版 Redis 任务消费者启动，browser_pool_size=2, contexts_per_browser=2, concurrent_workers=4
+2026-04-30 17:38:42 [INFO] [fetch-consumer-3][任务:b50cc9bb-10fd-4c21-96ae-198342a78214] 开始处理，priority=10, score=108222458078227.0, prompt='基于图片的这个人，生成半夜吵架的视频中文对话'
+2026-04-30 17:39:24 [ERROR] [fetch-consumer-3][任务:b50cc9bb-10fd-4c21-96ae-198342a78214] 第 1 次处理失败: [Worker 0] 已切换 3 次 Cookie 仍无可用账号，任务终止
+Traceback (most recent call last):
+  File "D:\2026_SKILL\flow\automation_video_v2_fetch_consumer.py", line 490, in _prepare_runtime_with_account_rotation
+    access_token, recaptcha_token, credits = await prepare_runtime(page)
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\automation_video_v2_fetch_consumer.py", line 124, in prepare_runtime
+    recaptcha_token = await page.evaluate(
+                      ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\site-packages\patchright\async_api\_generated.py", line 8380, in evaluate
+    await self._impl_obj.evaluate(
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\site-packages\patchright\_impl\_page.py", line 446, in evaluate
+    return await self._main_frame.evaluate(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\site-packages\patchright\_impl\_frame.py", line 287, in evaluate
+    await self._channel.send(
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\site-packages\patchright\_impl\_connection.py", line 52, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\site-packages\patchright\_impl\_connection.py", line 500, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+patchright._impl._errors.Error: Page.evaluate: TypeError: Cannot read properties of undefined (reading 'enterprise')
+    at window.grecaptcha.enterprise.execute.action (eval at evaluate (:290:30), <anonymous>:2:62)
+    at new Promise (<anonymous>)
+    at eval (eval at evaluate (:290:30), <anonymous>:2:19)
+    at UtilityScript.evaluate (<anonymous>:297:18)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "D:\2026_SKILL\flow\redis_task_video_fetch_consumer.py", line 173, in consumer_worker
+    local_path = await handle_single_task(scraper, task_collection, task)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\redis_task_video_fetch_consumer.py", line 134, in handle_single_task
+    raise raw_result
+  File "D:\2026_SKILL\driver_base\multi_browser_scraper_base\__init__.py", line 654, in _run_single_task
+    result = await self._run_worker_task(worker_record, task, worker_context)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\driver_base\multi_browser_scraper_base\__init__.py", line 837, in _run_worker_task
+    return await asyncio.wait_for(task_coro, timeout=self.task_timeout_ms / 1000)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\Lib\asyncio\tasks.py", line 489, in wait_for
+    return fut.result()
+           ^^^^^^^^^^^^
+  File "D:\2026_SKILL\driver_base\browser_worker\__init__.py", line 294, in run_task
+    return await self._process_task(page, task_data, worker_context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\automation_video_v2_fetch_consumer.py", line 523, in process_task
+    access_token, recaptcha_token, credits = await self._prepare_runtime_with_account_rotation(page, task_data, worker)
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\2026_SKILL\flow\automation_video_v2_fetch_consumer.py", line 501, in _prepare_runtime_with_account_rotation
+    raise RuntimeError(f"[Worker {worker.worker_id}] 已切换 {max_switches} 次 Cookie 仍无可用账号，任务终止") from exc
+RuntimeError: [Worker 0] 已切换 3 次 Cookie 仍无可用账号，任务终止
+2026-04-30 17:39:24 [INFO] [fetch-consumer-3][任务:b50cc9bb-10fd-4c21-96ae-198342a78214] 任务已放回主队列重试，retry_count=1, priority=20, score=208222458035082
+2026-04-30 17:39:24 [INFO] [fetch-consumer-1][任务:b50cc9bb-10fd-4c21-96ae-198342a78214] 开始处理，priority=20, score=208222458035082.0, prompt='基于图片的这个人，生成半夜吵架的视频中文对话'
