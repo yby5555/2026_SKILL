@@ -20,6 +20,7 @@ from .flow_api import (
     REFERENCE_VIDEO_MODEL_KEY,
     SITE_KEY,
     TEXT_VIDEO_MODEL_KEY,
+    build_flow_api_headers,
     browser_fetch_json,
     build_generate_payload,
     build_reference_generate_payload,
@@ -144,6 +145,7 @@ class CreditCheckedFlowScraper(PlainPlaywrightBrowserPoolBase):
             logger: 日志器对象。
             **kwargs: 传给浏览器池基类的参数。
         """
+        kwargs.setdefault("logger", logger)
         super().__init__(**kwargs)
         self.settings = settings
         self.redis_client = redis_client
@@ -166,6 +168,9 @@ class CreditCheckedFlowScraper(PlainPlaywrightBrowserPoolBase):
             if not next_item:
                 raise RuntimeError("Redis cookie 池为空")
             task["email"], task["cookies"] = next_item
+            task["_cookie_acquired_from_pool"] = True
+        else:
+            task.setdefault("_cookie_acquired_from_pool", False)
         task.setdefault("output_dir", str(self.settings.output_dir))
         task.setdefault("poll_timeout_ms", self.settings.poll_timeout_ms or DEFAULT_POLL_TIMEOUT_MS)
         return task
@@ -185,13 +190,15 @@ class CreditCheckedFlowScraper(PlainPlaywrightBrowserPoolBase):
             exc: 任务异常对象。
         """
         del result, exc
-        email = task_data.get("email")
+        email = str(task_data.get("email") or "").strip()
         if not email:
             return
         try:
-            release_cookie(self.redis_client, self.settings, str(email))
-        except Exception:
-            pass
+            new_value = release_cookie(self.redis_client, self.settings, email)
+            source = "runtime-pool" if task_data.get("_cookie_acquired_from_pool") else "task-provided"
+            self.logger.info(f"[cookie] 已归还账号 {email}，source={source}，当前占用数={new_value}")
+        except Exception as release_exc:
+            self.logger.exception(f"[cookie] 归还账号 {email} 失败: {release_exc}")
 
     async def prepare_runtime_after_credit_check(self, page: Any) -> tuple[str, str, dict[str, Any]]:
         """在额度检查通过后准备 access token、recaptcha token 和 credits payload。
@@ -210,6 +217,7 @@ class CreditCheckedFlowScraper(PlainPlaywrightBrowserPoolBase):
             page,
             url="/fx/api/auth/session",
             method="GET",
+            headers=build_flow_api_headers(json_body=False),
             credentials="include",
         )
         session_json = session_payload.get("json") or {}
@@ -231,7 +239,7 @@ class CreditCheckedFlowScraper(PlainPlaywrightBrowserPoolBase):
             page,
             url=CREDITS_ENDPOINT,
             method="GET",
-            headers={"authorization": f"Bearer {access_token}"},
+            headers=build_flow_api_headers(access_token, json_body=False),
         )
         return access_token, recaptcha_token, credits_payload.get("json") or {}
 
@@ -297,7 +305,7 @@ class CreditCheckedFlowScraper(PlainPlaywrightBrowserPoolBase):
             url=generate_url,
             method="POST",
             payload=payload,
-            headers={"authorization": f"Bearer {access_token}"},
+            headers=build_flow_api_headers(access_token),
         )
         if not generate_response.get("ok"):
             raise RuntimeError(generate_response.get("text") or "generate 请求失败")

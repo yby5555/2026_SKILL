@@ -150,7 +150,7 @@ async def consume_forever() -> None:
         logger=logger,  # 日志器
         browser_pool_size=settings.browser_pool_size,  # 浏览器数量（保持消费者自己的并发配置）
         max_contexts_per_browser=settings.contexts_per_browser,  # 每个浏览器的 context 数（保持消费者自己的并发配置）
-        headless=False,  # 对齐 video_api_server.py：固定有头模式
+        headless=settings.headless,  # 是否无头运行由 FLOW_TASK_HEADLESS 控制
         extra_flags=["--start-maximized"],  # 对齐 video_api_server.py：仅保留这个启动参数
         viewport=None,  # 对齐 video_api_server.py：不固定视口
         navigation_timeout_ms=settings.navigation_timeout_ms,  # 页面导航超时
@@ -158,15 +158,19 @@ async def consume_forever() -> None:
         default_cookie_domain=".google.com",  # 对齐 video_api_server.py：缺省 cookie 域名
         ignore_https_errors=False,  # 对齐 standalone/video_api 行为：不忽略 HTTPS 错误
         add_default_launch_flags=False,  # 对齐 video_api_server.py：不额外增加 AutomationControlled / infobars 标记
-        recycle_browser_after_tasks=20,  # 单浏览器累计执行多少任务后回收
-        recycle_browser_after_failures=3,  # 连续失败多少次后回收
+        recycle_browser_after_tasks=settings.recycle_browser_after_tasks,  # 单浏览器累计执行多少任务后回收
+        recycle_browser_after_failures=settings.recycle_browser_after_failures,  # 连续失败多少次后回收
     )
 
     logger.info(
         "[启动] 新视频任务消费者启动，"
         f"browser_pool_size={settings.browser_pool_size}, "
         f"contexts_per_browser={settings.contexts_per_browser}, "
-        f"consumer_workers={settings.consumer_workers}"
+        f"consumer_workers={settings.consumer_workers}, "
+        f"headless={settings.headless}, "
+        f"recycle_after_tasks={settings.recycle_browser_after_tasks}, "
+        f"recycle_after_failures={settings.recycle_browser_after_failures}, "
+        f"cookie_inuse_ttl_seconds={settings.cookie_inuse_ttl_seconds}"
     )
 
     async with scraper:

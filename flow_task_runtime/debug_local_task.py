@@ -14,9 +14,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
+
+from playwright_stealth.stealth import Stealth
 
 if __package__ in (None, ""):
     ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -33,12 +36,91 @@ else:
     from .storage import create_account_collection, create_redis_client
 
 
+class StealthCreditCheckedFlowScraper(CreditCheckedFlowScraper):
+    """仅用于本地调试脚本的 stealth 版本抓取器。"""
+
+    async def initialize_page(self, page: Any, task_data: dict[str, Any], worker: Any) -> None:
+        """在业务逻辑执行前给页面注入 playwright_stealth。"""
+        await super().initialize_page(page, task_data, worker)
+        await Stealth().apply_stealth_async(page)
+        try:
+            fingerprint = await page.evaluate(
+                """() => ({
+                    userAgent: navigator.userAgent,
+                    webdriver: navigator.webdriver,
+                    languages: navigator.languages,
+                    platform: navigator.platform,
+                    plugins: navigator.plugins ? navigator.plugins.length : null,
+                    hardwareConcurrency: navigator.hardwareConcurrency,
+                    deviceMemory: navigator.deviceMemory || null,
+                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    viewport: { width: window.innerWidth, height: window.innerHeight },
+                    screen: { width: screen.width, height: screen.height },
+                })"""
+            )
+            self.logger.info(
+                "[debug] browser fingerprint "
+                f"worker={worker.worker_id}: {json.dumps(fingerprint, ensure_ascii=False)}"
+            )
+        except Exception as exc:
+            self.logger.warning(f"[debug] browser fingerprint collection failed: {exc!r}")
+        self.logger.info(f"[debug] playwright_stealth 已注入页面，worker={worker.worker_id}")
+
+def read_debug_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_recaptcha_unusual_activity(result: Any) -> bool:
+    if not isinstance(result, Exception):
+        return False
+    text = f"{type(result).__name__}: {result}"
+    return "reCAPTCHA evaluation failed" in text or "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in text
+
+
+def create_debug_scraper(
+    *,
+    settings: Any,
+    redis_client: Any,
+    account_collection: Any,
+    logger: Any,
+    headless: bool,
+) -> StealthCreditCheckedFlowScraper:
+    logger.info(f"[debug] creating scraper, headless={headless}")
+    return StealthCreditCheckedFlowScraper(
+        settings=settings,
+        redis_client=redis_client,
+        account_collection=account_collection,
+        logger=logger,
+        browser_pool_size=1,
+        max_contexts_per_browser=1,
+        headless=headless,
+        extra_flags=[
+            "--start-maximized",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-infobars",
+            "--window-size=1920,1080",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-first-run",
+        ],
+        viewport={"width": 1920, "height": 1080},
+        navigation_timeout_ms=settings.navigation_timeout_ms,
+        task_timeout_ms=settings.task_timeout_ms,
+        default_cookie_domain=".google.com",
+        recycle_browser_after_tasks=20,
+        recycle_browser_after_failures=3,
+    )
+
+
 LOCAL_TASK: dict[str, Any] = {
     "_id": "debug-local-task-001",  # 本地调试任务 ID
     "type": 1,  # 视频任务类型，固定为 1
     "prompt": "使用第一张图中的人物作为主角，结合第二张图的代码工作区，生成一段竖版视频：人物在现代办公室里一边做轻度有氧动作一边持续编程，镜头稳定，动作自然，适合短视频展示。",  # 本地调试 prompt
     "image_value": [
-        str(Path(__file__).resolve().parent.parent / "flow" / "1ad0fd6709f24b3ebc7ca0da7a44e698.png"),  # 第一张参考图
+        str(Path(__file__).resolve().parent.parent / "flow" / "otter.png"),  # 第一张参考图
         str(Path(__file__).resolve().parent.parent / "flow" / "videos" / "pending" / "image.png"),  # 第二张参考图
     ],
     "image_type": "",  # 留空表示自动识别图片类型
@@ -93,7 +175,7 @@ def normalize_local_task(task: dict[str, Any]) -> dict[str, Any]:
     return normalized_task
 
 
-async def run_local_debug_task() -> list[Any]:
+async def run_local_debug_task_legacy() -> list[Any]:
     """执行本地调试任务并返回抓取结果列表。
 
     返回:
@@ -104,16 +186,24 @@ async def run_local_debug_task() -> list[Any]:
     redis_client = create_redis_client(settings)  # 创建 Redis 客户端
     account_collection = create_account_collection(settings)  # 创建账号集合
 
-    scraper = CreditCheckedFlowScraper(
+    scraper = StealthCreditCheckedFlowScraper(
         settings=settings,  # 运行配置
         redis_client=redis_client,  # Redis 客户端
         account_collection=account_collection,  # Mongo 账号集合
         logger=logger,  # 日志器
         browser_pool_size=1,  # 本地调试固定只开 1 个浏览器
         max_contexts_per_browser=1,  # 本地调试固定只开 1 个 context
-        headless=False,  # 本地调试默认有头运行
-        extra_flags=["--start-maximized"],  # 浏览器最大化启动
-        viewport=None,  # 不固定视口
+        headless=False,  # 🔥 改为无头模式进行测试
+        extra_flags=[
+            "--start-maximized",  # 浏览器最大化启动
+            "--disable-blink-features=AutomationControlled",  # 防检测
+            "--disable-infobars",  # 禁用信息栏
+            "--window-size=1920,1080",  # 设置窗口大小
+            "--disable-dev-shm-usage",  # 避免共享内存问题
+            "--disable-gpu",  # 无头模式禁用GPU
+            "--no-first-run",  # 跳过首次运行
+        ],  # 增强的无头模式参数
+        viewport={"width": 1920, "height": 1080},  # 🆕 配合window-size设置固定视口
         navigation_timeout_ms=settings.navigation_timeout_ms,  # 页面导航超时
         task_timeout_ms=settings.task_timeout_ms,  # 单任务总超时
         default_cookie_domain=".google.com",  # 缺省 cookie 域名
@@ -126,6 +216,45 @@ async def run_local_debug_task() -> list[Any]:
 
     async with scraper:
         results = await scraper.run_tasks([local_task])
+
+    return results
+
+
+async def run_local_debug_task() -> list[Any]:
+    settings = load_settings()
+    logger = get_logger("FlowTaskRuntimeDebug", settings.log_file)
+    redis_client = create_redis_client(settings)
+    account_collection = create_account_collection(settings)
+
+    local_task = normalize_local_task(LOCAL_TASK)
+    logger.info(f"[debug] starting local debug task: {local_task.get('_id')}")
+
+    headless_first = read_debug_bool("FLOW_TASK_DEBUG_HEADLESS", True)
+    fallback_to_headed = read_debug_bool("FLOW_TASK_DEBUG_FALLBACK_HEADED", True)
+    scraper = create_debug_scraper(
+        settings=settings,
+        redis_client=redis_client,
+        account_collection=account_collection,
+        logger=logger,
+        headless=headless_first,
+    )
+    async with scraper:
+        results = await scraper.run_tasks([local_task])
+
+    if headless_first and fallback_to_headed and any(is_recaptcha_unusual_activity(item) for item in results):
+        logger.warning(
+            "[debug] headless run hit reCAPTCHA unusual activity; "
+            "retrying once with headed browser"
+        )
+        headed_scraper = create_debug_scraper(
+            settings=settings,
+            redis_client=redis_client,
+            account_collection=account_collection,
+            logger=logger,
+            headless=False,
+        )
+        async with headed_scraper:
+            results = await headed_scraper.run_tasks([local_task])
 
     return results
 

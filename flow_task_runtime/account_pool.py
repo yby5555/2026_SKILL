@@ -19,7 +19,20 @@ if cur >= tonumber(ARGV[1]) then
     return 0
 end
 redis.call('INCR', KEYS[1])
+local ttl = tonumber(ARGV[2] or 0)
+if ttl and ttl > 0 then
+    redis.call('EXPIRE', KEYS[1], ttl)
+end
 return 1
+"""
+
+_LUA_SAFE_RELEASE = """
+local cur = tonumber(redis.call('GET', KEYS[1]) or 0)
+if cur <= 1 then
+    redis.call('DEL', KEYS[1])
+    return 0
+end
+return redis.call('DECR', KEYS[1])
 """
 
 
@@ -56,7 +69,10 @@ def get_next_cookie(redis_client: Any, settings: RuntimeSettings, max_attempts: 
             continue
 
         inuse_key = settings.redis_inuse_key.format(email=email)
-        acquired = script(keys=[inuse_key], args=[settings.max_concurrent_per_account])
+        acquired = script(
+            keys=[inuse_key],
+            args=[settings.max_concurrent_per_account, settings.cookie_inuse_ttl_seconds or 0],
+        )
         if not acquired:
             continue
 
@@ -65,18 +81,20 @@ def get_next_cookie(redis_client: Any, settings: RuntimeSettings, max_attempts: 
     return None
 
 
-def release_cookie(redis_client: Any, settings: RuntimeSettings, email: str) -> None:
+def release_cookie(redis_client: Any, settings: RuntimeSettings, email: str) -> int:
     """归还指定账号的并发槽位。
 
     参数:
         redis_client: Redis 客户端。
         settings: 运行时配置对象，提供 inuse key 模板。
         email: 要归还槽位的账号邮箱。
+    返回:
+        int: 归还后的 inuse 计数；0 表示已无占用并删除占用 key。
     """
     inuse_key = settings.redis_inuse_key.format(email=email)
-    new_value = redis_client.decr(inuse_key)
-    if new_value <= 0:
-        redis_client.delete(inuse_key)
+    script = redis_client.register_script(_LUA_SAFE_RELEASE)
+    new_value = script(keys=[inuse_key], args=[])
+    return int(new_value)
 
 
 def remove_from_pool(redis_client: Any, settings: RuntimeSettings, email: str) -> None:

@@ -9,11 +9,12 @@ Google 自动登录并获取 Flow Cookie 的完整方案
 """
 
 # ==================== 配置区域 - 在这里修改你的账号信息 ====================
-GOOGLE_EMAIL = "@gmail.com"
-GOOGLE_PASSWORD = ""
-GOOGLE_TOTP_KEY = ""  # 2FA 验证密钥（如果没有2FA可留空）
+GOOGLE_EMAIL = "s5524h24h772@mubanima26.sbs"
+GOOGLE_PASSWORD = "!9U@jXKn"
+GOOGLE_TOTP_KEY = "aoks5pv5ekncg6ycbau3l2f7i4pa36e4"  # 2FA 验证密钥（如果没有2FA可留空）
+# {"email": "s5524h24h772@mubanima26.sbs", "password": "!9U@jXKn"},
 
-
+# {"email": "EnnalscrAvey@gmail.com",      "password": "edtc6qn23",   "totp_key": "aoks5pv5ekncg6ycbau3l2f7i4pa36e4"},
 
 
 OUTPUT_DIR = "D:/kuanghu-poc/flow"  # Cookie 保存目录
@@ -335,6 +336,13 @@ class GoogleAuthScraper(BaseSessionContextScraper):
 
             # 5. 验证登录成功
             await self.human.random_pause(2.0, 3.0)
+
+            try:
+                print("[INFO] Refreshing page before login verification...")
+                await page.reload(wait_until="domcontentloaded")
+                await self.human.random_pause(1.0, 2.0)
+            except Exception as e:
+                print(f"[WARN] Page refresh failed, continuing verification: {e}")
 
             current_url = page.url
             print(f"[INFO] Current URL after login: {current_url}")

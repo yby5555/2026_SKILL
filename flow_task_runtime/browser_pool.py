@@ -198,6 +198,7 @@ class PlainPlaywrightBrowserWorker:
         process_task: Any,
         recycle_after_tasks: int | None,
         recycle_after_failures: int | None,
+        logger: Any | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.max_contexts = max(1, int(max_contexts))
@@ -210,32 +211,72 @@ class PlainPlaywrightBrowserWorker:
         self._process_task = process_task
         self._recycle_after_tasks = recycle_after_tasks
         self._recycle_after_failures = recycle_after_failures
+        self.logger = logger
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._start_lock = asyncio.Lock()
         self.tasks_since_recycle = 0
         self.consecutive_failures = 0
         self.request_recycle = False
+        self.recycle_reason: str | None = None
+        self._closing = False
+
+    def _log_info(self, message: str) -> None:
+        if self.logger is not None:
+            self.logger.info(message)
+
+    def _log_warning(self, message: str) -> None:
+        if self.logger is not None:
+            self.logger.warning(message)
+
+    def is_browser_connected(self) -> bool:
+        """返回当前 worker 的 browser 是否仍处于连接状态。"""
+        return self._browser is not None and self._browser.is_connected()
+
+    def request_browser_recycle(self, reason: str) -> None:
+        """标记该 worker 需要在空闲后回收。"""
+        if not self.request_recycle:
+            self._log_warning(f"[browser-worker {self.worker_id}] 标记浏览器回收: {reason}")
+        self.request_recycle = True
+        self.recycle_reason = reason
+
+    def _on_browser_disconnected(self, *args: Any) -> None:
+        """Playwright browser 断开事件回调。"""
+        del args
+        if self._closing:
+            self._log_info(f"[browser-worker {self.worker_id}] 浏览器连接已关闭")
+            return
+        self.request_browser_recycle("browser disconnected")
 
     async def ensure_started(self) -> None:
         """确保 worker 底层 browser 已启动。"""
-        if self._browser is not None and self._browser.is_connected():
+        if self.is_browser_connected():
             return
         async with self._start_lock:
-            if self._browser is not None and self._browser.is_connected():
+            if self.is_browser_connected():
                 return
-            await self.close()
+            if self._browser is not None:
+                self._log_warning(f"[browser-worker {self.worker_id}] 检测到浏览器已断开，准备重新启动")
+            await self.close(reason="ensure_started cleanup")
             self._playwright = await async_playwright().start()
             try:
-                self._browser = await self._playwright.chromium.launch(**self._launch_options_factory(self))
+                launch_options = self._launch_options_factory(self)
+                self._log_info(f"[browser-worker {self.worker_id}] 启动浏览器: {launch_options}")
+                self._browser = await self._playwright.chromium.launch(**launch_options)
+                self._browser.on("disconnected", self._on_browser_disconnected)
+                self._log_info(f"[browser-worker {self.worker_id}] 浏览器启动完成，capacity={self.max_contexts}")
             except Exception:
-                await self.close()
+                await self.close(reason="launch failed")
                 raise
 
-    async def close(self) -> None:
+    async def close(self, *, reason: str | None = None) -> None:
         """关闭底层 browser 和 playwright 会话。"""
+        if self._browser is not None or self._playwright is not None:
+            suffix = f": {reason}" if reason else ""
+            self._log_info(f"[browser-worker {self.worker_id}] 关闭浏览器/Playwright{suffix}")
         if self._browser is not None:
             try:
+                self._closing = True
                 await self._browser.close()
             except Exception:
                 pass
@@ -249,30 +290,32 @@ class PlainPlaywrightBrowserWorker:
         self.tasks_since_recycle = 0
         self.consecutive_failures = 0
         self.request_recycle = False
+        self.recycle_reason = None
+        self._closing = False
 
     async def recycle_if_needed(self, *, active_tasks: int) -> None:
         """在 worker 空闲且已请求回收时关闭 browser。"""
         if active_tasks > 0 or not self.request_recycle:
             return
-        await self.close()
+        await self.close(reason=self.recycle_reason or "recycle requested")
 
     def record_success(self) -> None:
         """记录一次成功执行。"""
         self.tasks_since_recycle += 1
         self.consecutive_failures = 0
         if self._recycle_after_tasks and self.tasks_since_recycle >= self._recycle_after_tasks:
-            self.request_recycle = True
+            self.request_browser_recycle(f"tasks_since_recycle={self.tasks_since_recycle}")
 
     def record_failure(self, category: FailureCategory) -> None:
         """记录一次失败执行。"""
         self.tasks_since_recycle += 1
         self.consecutive_failures += 1
         if category == FailureCategory.WORKER_ERROR:
-            self.request_recycle = True
+            self.request_browser_recycle(f"worker error: {category}")
         if self._recycle_after_tasks and self.tasks_since_recycle >= self._recycle_after_tasks:
-            self.request_recycle = True
+            self.request_browser_recycle(f"tasks_since_recycle={self.tasks_since_recycle}")
         if self._recycle_after_failures and self.consecutive_failures >= self._recycle_after_failures:
-            self.request_recycle = True
+            self.request_browser_recycle(f"consecutive_failures={self.consecutive_failures}")
 
     async def run_task(self, *, task_data: dict[str, Any], worker_context: WorkerContext) -> Any:
         """创建 context/page 并执行单个任务。"""
@@ -285,13 +328,19 @@ class PlainPlaywrightBrowserWorker:
 
         context: BrowserContext | None = None
         page: Page | None = None
+        task_id = str(task_data.get("_id") or "<unknown>")
         try:
+            self._log_info(
+                f"[browser-worker {self.worker_id}][任务:{task_id}] 创建 context，"
+                f"active={worker_context.active_tasks}/{worker_context.browser_task_capacity}"
+            )
             if cookies_payload:
                 context = await self._browser.new_context(storage_state={"cookies": cookies_payload}, **context_options)
             else:
                 context = await self._browser.new_context(**context_options)
             context = await self._initialize_context_hook(context, task_data, worker_context)
             page = await context.new_page()
+            self._log_info(f"[browser-worker {self.worker_id}][任务:{task_id}] context/page 已创建")
             page.set_default_navigation_timeout(self.navigation_timeout_ms)
             page.set_default_timeout(self.navigation_timeout_ms)
             await self._initialize_page_hook(page, task_data, worker_context)
@@ -307,6 +356,8 @@ class PlainPlaywrightBrowserWorker:
                     await context.close()
                 except Exception:
                     pass
+            if page is not None or context is not None:
+                self._log_info(f"[browser-worker {self.worker_id}][任务:{task_id}] context/page 已关闭")
 
 
 class PlainPlaywrightBrowserPoolBase:
@@ -332,6 +383,7 @@ class PlainPlaywrightBrowserPoolBase:
         add_default_launch_flags: bool = True,
         recycle_browser_after_tasks: int | None = 50,
         recycle_browser_after_failures: int | None = 3,
+        logger: Any | None = None,
     ) -> None:
         self.browser_pool_size = max(1, int(browser_pool_size))
         self.max_contexts_per_browser = max(1, int(max_contexts_per_browser))
@@ -350,6 +402,7 @@ class PlainPlaywrightBrowserPoolBase:
         self.add_default_launch_flags = bool(add_default_launch_flags)
         self._recycle_browser_after_tasks = recycle_browser_after_tasks
         self._recycle_browser_after_failures = recycle_browser_after_failures
+        self.logger = logger
         self._workers: list[PlainPlaywrightBrowserWorker] = []
         self._worker_active_counts: dict[int, int] = {}
         self._workers_recycling: set[int] = set()
@@ -358,6 +411,14 @@ class PlainPlaywrightBrowserPoolBase:
         self._closed = False
         self._start_lock = asyncio.Lock()
         self._next_worker_id = 0
+
+    def _log_info(self, message: str) -> None:
+        if self.logger is not None:
+            self.logger.info(message)
+
+    def _log_warning(self, message: str) -> None:
+        if self.logger is not None:
+            self.logger.warning(message)
 
     async def start(self) -> None:
         """启动 browser pool。"""
@@ -368,17 +429,28 @@ class PlainPlaywrightBrowserPoolBase:
                 return
             self._started = True
             self._closed = False
+            self._log_info(
+                "[browser-pool] 已启动: "
+                f"browser_pool_size={self.browser_pool_size}, "
+                f"contexts_per_browser={self.max_contexts_per_browser}, "
+                f"headless={self.headless}, "
+                f"recycle_after_tasks={self._recycle_browser_after_tasks}, "
+                f"recycle_after_failures={self._recycle_browser_after_failures}"
+            )
 
     async def close(self) -> None:
         """关闭所有 browser worker。"""
         if not self._started or self._closed:
             return
         for worker in self._workers:
-            await worker.close()
+            await worker.close(reason="pool closing")
         async with self._pool_condition:
+            self._workers.clear()
+            self._worker_active_counts.clear()
             self._workers_recycling.clear()
             self._pool_condition.notify_all()
         self._closed = True
+        self._log_info("[browser-pool] 已关闭")
 
     async def __aenter__(self) -> "PlainPlaywrightBrowserPoolBase":
         """进入异步上下文时自动启动 browser pool。"""
@@ -515,6 +587,7 @@ class PlainPlaywrightBrowserPoolBase:
                     for worker in self._workers
                     if self._worker_active_counts.get(worker.worker_id, 0) < worker.max_contexts
                     and worker.worker_id not in self._workers_recycling
+                    and not worker.request_recycle
                 ]
                 if available:
                     worker = min(
@@ -527,13 +600,40 @@ class PlainPlaywrightBrowserPoolBase:
                         ),
                     )
                     self._worker_active_counts[worker.worker_id] += 1
+                    self._log_info(
+                        f"[browser-pool] 分配 worker={worker.worker_id}, "
+                        f"active={self._worker_active_counts[worker.worker_id]}/{worker.max_contexts}"
+                    )
                     return worker
-                if len(self._workers) < self.browser_pool_size:
+                idle_recycle_worker = next(
+                    (
+                        worker
+                        for worker in self._workers
+                        if self._worker_active_counts.get(worker.worker_id, 0) == 0
+                        and worker.request_recycle
+                        and worker.worker_id not in self._workers_recycling
+                    ),
+                    None,
+                )
+                if idle_recycle_worker is not None:
+                    self._workers_recycling.add(idle_recycle_worker.worker_id)
+                    should_retire_worker = idle_recycle_worker
+                elif len(self._workers) < self.browser_pool_size:
                     worker = self._create_worker()
                     self._workers.append(worker)
                     self._worker_active_counts[worker.worker_id] = 1
+                    self._log_info(
+                        f"[browser-pool] 创建并分配 worker={worker.worker_id}, "
+                        f"active=1/{worker.max_contexts}, workers={len(self._workers)}/{self.browser_pool_size}"
+                    )
                     return worker
-                await self._pool_condition.wait()
+                else:
+                    await self._pool_condition.wait()
+                    continue
+
+            if should_retire_worker is not None:
+                await self._retire_worker(should_retire_worker)
+                continue
 
     async def _release_worker(self, worker: PlainPlaywrightBrowserWorker) -> None:
         """释放 worker 占用并在需要时执行回收。"""
@@ -546,16 +646,29 @@ class PlainPlaywrightBrowserPoolBase:
             if current_active == 0 and worker.request_recycle:
                 self._workers_recycling.add(worker.worker_id)
                 should_recycle = True
+            self._log_info(
+                f"[browser-pool] 释放 worker={worker.worker_id}, "
+                f"active={current_active}/{worker.max_contexts}, recycle={worker.request_recycle}"
+            )
             self._pool_condition.notify_all()
 
         if not should_recycle:
             await worker.recycle_if_needed(active_tasks=current_active)
             return
 
+        await self._retire_worker(worker)
+
+    async def _retire_worker(self, worker: PlainPlaywrightBrowserWorker) -> None:
+        """关闭并从池中移除一个空闲 worker，后续任务会创建全新的 worker 对象。"""
+        reason = worker.recycle_reason or "worker retired"
+        self._log_warning(f"[browser-pool] 回收 worker={worker.worker_id}: {reason}")
         try:
-            await worker.recycle_if_needed(active_tasks=0)
+            await worker.close(reason=reason)
         finally:
             async with self._pool_condition:
+                if self._worker_active_counts.get(worker.worker_id, 0) == 0:
+                    self._workers = [item for item in self._workers if item.worker_id != worker.worker_id]
+                    self._worker_active_counts.pop(worker.worker_id, None)
                 self._workers_recycling.discard(worker.worker_id)
                 self._pool_condition.notify_all()
 
@@ -583,6 +696,7 @@ class PlainPlaywrightBrowserPoolBase:
             process_task=self.process_task,
             recycle_after_tasks=self._recycle_browser_after_tasks,
             recycle_after_failures=self._recycle_browser_after_failures,
+            logger=self.logger,
         )
         self._next_worker_id += 1
         return worker

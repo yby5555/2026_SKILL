@@ -1502,7 +1502,7 @@ async def main():
 
     scraper = GoogleFlowVideoScraperV2(
         browser_pool_size=1,
-        headless=False,
+        headless=True,
         extra_flags=["--start-maximized"],
         viewport={"width": 0, "height": 0},
         task_timeout_ms=12 * 60 * 1000
@@ -1512,7 +1512,7 @@ async def main():
 
     # 为了测试 Base64 内存直传，先在外部读取文件转为 base64
     import base64
-    test_image_path = r"d:\2026_SKILL\flow\1ad0fd6709f24b3ebc7ca0da7a44e698.png"
+    test_image_path = r"d:\2026_SKILL\flow\otter.png"
     with open(test_image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode("utf-8")
     pending_image_path = r"d:\2026_SKILL\flow\videos\pending\image.png"

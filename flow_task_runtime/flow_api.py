@@ -23,6 +23,32 @@ TEXT_VIDEO_MODEL_KEY = "veo_3_1_t2v_lite"
 REFERENCE_VIDEO_MODEL_KEY = "veo_3_1_r2v_lite"
 SITE_KEY = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
 RECAPTCHA_SCRIPT_URL = f"https://www.google.com/recaptcha/enterprise.js?render={SITE_KEY}"
+FLOW_API_ACCEPT_HEADER = "application/json, text/plain, */*"
+
+
+def build_flow_api_headers(
+    access_token: str | None = None,
+    *,
+    json_body: bool = True,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """构建 Flow/AI Sandbox fetch 请求头。
+
+    说明：
+    - `User-Agent`、`Origin`、`Referer`、`Sec-Fetch-*` 等浏览器受控头不能通过 fetch
+      headers 手动设置；这些会由页面上下文和 fetch 选项自动补齐。
+    - 这里仅设置 CORS 允许且业务必要的头，避免添加任意自定义头导致预检失败。
+    """
+    headers = {
+        "accept": FLOW_API_ACCEPT_HEADER,
+    }
+    if json_body:
+        headers["content-type"] = "application/json"
+    if access_token:
+        headers["authorization"] = f"Bearer {access_token}"
+    if extra_headers:
+        headers.update({str(key).lower(): str(value) for key, value in extra_headers.items()})
+    return headers
 
 
 async def browser_fetch_json(
@@ -32,6 +58,8 @@ async def browser_fetch_json(
     payload: Any | None = None,
     headers: dict[str, str] | None = None,
     credentials: str = "omit",
+    referrer: str = FLOW_HOME_URL,
+    referrer_policy: str = "strict-origin-when-cross-origin",
 ) -> dict[str, Any]:
     """在浏览器页面上下文里发起 fetch 并返回 JSON 结果。
 
@@ -42,13 +70,23 @@ async def browser_fetch_json(
         payload: 请求体。
         headers: 请求头。
         credentials: fetch 的 credentials 选项。
+        referrer: 浏览器 fetch referrer 选项，用于让请求更接近页面内真实请求。
+        referrer_policy: 浏览器 fetch referrerPolicy 选项。
 
     返回:
         dict[str, Any]: 包含 ok/status/text/json/headers 的响应字典。
     """
     return await page.evaluate(
-        """async ({url, method, payload, headers, credentials}) => {
-            const init = { method, headers: headers || {}, credentials };
+        """async ({url, method, payload, headers, credentials, referrer, referrerPolicy}) => {
+            const init = {
+                method,
+                headers: headers || {},
+                credentials,
+                mode: "cors",
+                cache: "no-store",
+                referrer,
+                referrerPolicy,
+            };
             if (payload !== undefined && payload !== null) {
                 init.body = typeof payload === "string" ? payload : JSON.stringify(payload);
             }
@@ -74,6 +112,8 @@ async def browser_fetch_json(
             "payload": payload,
             "headers": headers or {},
             "credentials": credentials,
+            "referrer": referrer,
+            "referrerPolicy": referrer_policy,
         },
     )
 
@@ -93,7 +133,7 @@ async def create_project(page: Any, task_id: str) -> str:
         url=CREATE_PROJECT_ENDPOINT,
         method="POST",
         payload={"json": {"projectTitle": f"runtime {task_id}", "toolName": "PINHOLE"}},
-        headers={"content-type": "application/json"},
+        headers=build_flow_api_headers(),
         credentials="include",
     )
     payload = response.get("json") or {}
@@ -208,7 +248,7 @@ async def upload_reference_image(page: Any, access_token: str, project_id: str, 
         url=UPLOAD_IMAGE_ENDPOINT,
         method="POST",
         payload=payload,
-        headers={"authorization": f"Bearer {access_token}"},
+        headers=build_flow_api_headers(access_token),
     )
     if not response.get("ok"):
         raise RuntimeError(f"uploadImage failed: {response.get('status')} {response.get('text')}")
@@ -238,7 +278,7 @@ async def wait_for_video(page: Any, access_token: str, media_items: list[dict[st
             url=STATUS_ENDPOINT,
             method="POST",
             payload={"media": media_items},
-            headers={"authorization": f"Bearer {access_token}"},
+            headers=build_flow_api_headers(access_token),
         )
         payload = response.get("json") or {}
         media = payload.get("media") or payload.get("result", {}).get("data", {}).get("media", [])

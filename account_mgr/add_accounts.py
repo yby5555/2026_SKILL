@@ -19,12 +19,15 @@ from mongo_utils import create_mongo_client, get_collection
 # ==================== 账号列表（在这里填写账号） ====================
 ACCOUNTS = [
     # {"email": "xxx@gmail.com", "password": "密码", "totp_key": "2FA密钥（无则留空）"},
-    {"email": "EnnalscrAvey@gmail.com",      "password": "edtc6qn23",   "totp_key": "aoks5pv5ekncg6ycbau3l2f7i4pa36e4"},
-    {"email": "VieauTakemura@gmail.com",      "password": "wzslsxbvzdv", "totp_key": "gszqli4nnfgwjmdarhvjsq7q4o2cehix"},
-    {"email": "DanielwalterDresch@gmail.com", "password": "tl7zbhuwzut", "totp_key": "olfawz73mf3titwe3acewh6x3h4o4xxq"},
+    # {"email": "EnnalscrAvey@gmail.com",      "password": "edtc6qn23",   "totp_key": "aoks5pv5ekncg6ycbau3l2f7i4pa36e4"},
+
+    # {"email": "VieauTakemura@gmail.com",      "password": "wzslsxbvzdv", "totp_key": "gszqli4nnfgwjmdarhvjsq7q4o2cehix"},
+    # {"email": "DanielwalterDresch@gmail.com", "password": "tl7zbhuwzut", "totp_key": "olfawz73mf3titwe3acewh6x3h4o4xxq"},
     # {"email": "KansecoKosme@gmail.com", "password": "1iirbyqciop","totp_key": "an6u2p22qryeu3qbzyt2xumor5tcwjdc"},
-    {"email": "LeitheiserFigueira@gmail.com", "password": "zsdsgqsqlgi","totp_key": "3pqpdx2e3hnhkn742hg3ybikzvmkqsey"},
-    {"email": "hardcoregamer1026@gmail.com", "password": "gV0Ry0ctG1Z6Gd","totp_key": "nhes7famqcjhlphhrfncxwf3qtx75vv4"},
+    # {"email": "LeitheiserFigueira@gmail.com", "password": "zsdsgqsqlgi","totp_key": "3pqpdx2e3hnhkn742hg3ybikzvmkqsey"},
+    # {"email": "hardcoregamer1026@gmail.com", "password": "gV0Ry0ctG1Z6Gd","totp_key": "nhes7famqcjhlphhrfncxwf3qtx75vv4"},
+    {"email": "s5524h24h723@mubanima26.sbs", "password": "*2lN3eW1"},
+    # {"email": "s5524h24h772@mubanima26.sbs", "password": "!9U@jXKn"},
 
 ]
 # =====================================================================
