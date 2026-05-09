@@ -350,7 +350,7 @@ async def main() -> None:
             project_id = await create_project(page)
             print("project_id:", project_id)
 
-            prompt = "第一张是我传入的人物图片，第二张是代码，帮我生成这个人物边健身边打代码"
+            prompt = "第一张是我传入的人物图片，第二张是代码，帮我生成这个人物边喝酒边打代码"
             reference_images = [
                 Path(r"D:\2026_SKILL\flow\1ad0fd6709f24b3ebc7ca0da7a44e698.png"),
                 Path(r"D:\2026_SKILL\flow\videos\pending\image.png"),

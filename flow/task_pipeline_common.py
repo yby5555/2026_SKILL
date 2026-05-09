@@ -163,6 +163,9 @@ def build_scraper_task(task: dict[str, Any]) -> dict[str, Any]:
         "variant_count": 1,
         "poll_timeout_ms": int(task.get("poll_timeout_ms", DEFAULT_POLL_TIMEOUT_MS)),
     }
+    for passthrough_key in ("gen_type", "proportion", "model_type"):
+        if passthrough_key in task:
+            payload[passthrough_key] = task[passthrough_key]
     if "image_value" in task:
         payload.update(normalize_image_payload(task.get("image_value"), str(task.get("image_type", "") or "")))
     else:

@@ -13,6 +13,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from account_mgr.cos_utils import upload_file_to_cos
+from account_mgr.cos_utils import COS_VIDEO_PREFIX as _COS_VIDEO_PREFIX
 from task_pipeline_common import DEFAULT_UPLOAD_POLL_SECONDS, create_task_collection, get_logger
 
 logger = get_logger("LocalVideoUploader")
@@ -43,13 +44,15 @@ def build_cos_key(task_id: str, local_video_path: str) -> str:
     return f"{task_id}{suffix}"
 
 
-def mark_task_upload_success(collection: Any, task_id: str, cos_url: str) -> None:
+def mark_task_upload_success(collection: Any, task_id: str, cos_url: str, cos_key: str) -> None:
     collection.update_one(
         {"_id": task_id},
         {
             "$set": {
                 "msg": "已完成",
+                "task_status": "completed",
                 "cos_url": cos_url,
+                "cos_key": cos_key,
                 "error_msg": None,
                 "updated_at": now_local_naive(),
             }
@@ -63,6 +66,7 @@ def mark_task_upload_failure(collection: Any, task_id: str, error_message: str) 
         {
             "$set": {
                 "msg": "失败",
+                "task_status": "failed",
                 "error_msg": error_message,
                 "updated_at": now_local_naive(),
             }
@@ -85,7 +89,9 @@ def process_task(collection: Any, task: dict[str, Any]) -> None:
     for attempt in range(1, UPLOAD_MAX_ATTEMPTS + 1):
         try:
             cos_url = upload_once(task)
-            mark_task_upload_success(collection, task_id, cos_url)
+            raw_key = build_cos_key(task_id, str(task.get("local_video_path", "")))
+            cos_key = f"{_COS_VIDEO_PREFIX.rstrip('/')}/{raw_key}"
+            mark_task_upload_success(collection, task_id, cos_url, cos_key)
             local_path = Path(str(task["local_video_path"]))
             local_path.unlink(missing_ok=True)
             logger.info(f"[task:{task_id}] COS 上传完成并已删除本地文件: {cos_url}")
@@ -96,7 +102,9 @@ def process_task(collection: Any, task: dict[str, Any]) -> None:
             if attempt < UPLOAD_MAX_ATTEMPTS:
                 time.sleep(2)
 
-    error_message = str(last_error) if last_error else "上传失败"
+    error_message = str(last_error) if last_error else "上传异常"
+    if not error_message.startswith("上传异常"):
+        error_message = f"上传异常: {error_message}"
     mark_task_upload_failure(collection, task_id, error_message)
     logger.info(f"[task:{task_id}] 上传失败，已标记失败")
 

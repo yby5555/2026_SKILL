@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -35,31 +37,73 @@ CONTEXTS_PER_BROWSER = 2
 CONSUMER_WORKERS = BROWSER_POOL_SIZE * CONTEXTS_PER_BROWSER
 
 
+def extract_error_message(exc: Exception, fallback: str = "采集异常") -> str:
+    raw = str(exc)
+    if isinstance(exc, TimeoutError):
+        return "采集超时"
+    try:
+        m = re.search(r'\{[\s\S]*"error"[\s\S]*\}', raw)
+        if m:
+            error_obj = json.loads(m.group(0))
+            msg = error_obj.get("error", {}).get("message")
+            if msg:
+                return msg
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    status_match = re.search(r"'(MEDIA_GENERATION_STATUS_\w+)'", raw)
+    if status_match:
+        return status_match.group(1)
+    return fallback
+
+
+def mark_task_processing(collection: Any, task: dict[str, Any]) -> None:
+    task_id = str(task.get("_id", ""))
+    collection.update_one(
+        {"_id": task_id},
+        {
+            "$set": {
+                "msg": "执行中",
+                "task_status": "processing",
+                "updated_at": now_local(),
+            },
+        },
+    )
+
+
 def upsert_task_generation_result(
     collection: Any,
     task: dict[str, Any],
     local_video_path: str,
-    api_full_response:str
+    api_full_response: str,
+    file_md5: str | None = None,
+    filesize: int | None = None,
 ) -> None:
+    task_id = str(task["_id"])
+    update_fields: dict[str, Any] = {
+        "local_video_path": local_video_path,
+        "api_full_response": api_full_response,
+    }
+    if file_md5 is not None:
+        update_fields["file_md5"] = file_md5
+    if filesize is not None:
+        update_fields["filesize"] = filesize
+
     collection.update_one(
-        {"_id": str(task["_id"])},
-        {
-            "$set": {
-                "local_video_path": local_video_path,
-                "api_full_response": api_full_response,
-            },
-        },
+        {"_id": task_id},
+        {"$set": update_fields},
         upsert=True,
     )
 
 
 def mark_task_failed(collection: Any, task: dict[str, Any], error_message: str) -> None:
-    del error_message
+    task_id = str(task.get("_id", ""))
     collection.update_one(
-        {"_id": str(task["_id"])},
+        {"_id": task_id},
         {
             "$set": {
                 "msg": "失败",
+                "task_status": "failed",
+                "error_msg": error_message,
                 "updated_at": now_local(),
             },
         },
@@ -139,6 +183,8 @@ async def handle_single_task(scraper: GoogleFlowVideoScraperV2, collection: Any,
 
     downloaded_path = raw_result.get("local_video_path")
     api_full_response = raw_result.get("api_full_response")
+    file_md5 = raw_result.get("file_md5")
+    filesize = raw_result.get("filesize")
     
     if not downloaded_path:
         raise RuntimeError("未能从结果中获取到 downloaded_path，视频生成可能失败")
@@ -147,7 +193,9 @@ async def handle_single_task(scraper: GoogleFlowVideoScraperV2, collection: Any,
         collection=collection,
         task=task,
         local_video_path=str(downloaded_path) if downloaded_path else "",
-        api_full_response = api_full_response
+        api_full_response=api_full_response,
+        file_md5=file_md5,
+        filesize=filesize,
     )
     logger.info(f"[任务:{task_id}] 任务记录已更新, 视频路径: {downloaded_path}")
     return Path(downloaded_path) if downloaded_path else Path()
@@ -173,6 +221,8 @@ async def consumer_worker(
             logger.info(
                 f"[{worker_name}][任务:{task_id}] 开始处理，priority={current_priority}, score={current_score}, prompt={prompt[:60]!r}"
             )
+
+            mark_task_processing(task_collection, task)
 
             local_path = await handle_single_task(scraper, task_collection, task)
             _remove_processing_payload(redis_client, raw_payload)
@@ -202,7 +252,8 @@ async def consumer_worker(
                 )
             else:
                 _remove_processing_payload(redis_client, raw_payload)
-                mark_task_failed(task_collection, task, str(exc))
+                error_msg = extract_error_message(exc, "采集异常")
+                mark_task_failed(task_collection, task, error_msg)
                 logger.info(f"[{worker_name}][任务:{task_id}] 达到最大重试次数，已标记为失败")
 
 

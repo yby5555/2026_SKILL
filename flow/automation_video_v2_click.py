@@ -66,8 +66,17 @@ if not logger.handlers:
 
 FLOW_HOME_URL = "https://labs.google/fx/zh/tools/flow"
 VIDEO_SOURCE_LABEL = "素材"
-VIDEO_ASPECT_RATIO_LABEL = "9:16"
-VIDEO_MODEL_LABEL = "Veo 3.1 - Lite"
+FRAME_SOURCE_LABEL = "帧"
+DEFAULT_ASPECT_RATIO = "9:16"
+DEFAULT_MODEL_LABEL = "Veo 3.1 - Lite"
+MODEL_MAP = {
+    0: "Veo 3.1 - Lite",
+    1: "Veo 3.1 - Fast",
+}
+PROPORTION_MAP = {
+    0: "9:16",
+    1: "16:9",
+}
 
 async def human_delay(min_sec: float = 0.5, max_sec: float = 2.0):
     """模拟人类随机暂停"""
@@ -383,9 +392,9 @@ async def ensure_video_model(page, menu, worker_id: Any, target_model: str) -> N
     await human_click(page, target_option)
     await human_delay(0.6, 1.0)
 
-async def ensure_video_mode(page, worker_id: Any, variant_count: int) -> None:
-    """确保底部配置为视频、素材、9:16、xN、Veo 3.1 - Lite。"""
-    logger.info(f"[Worker {worker_id}] 正在设置视频配置 (素材, {VIDEO_ASPECT_RATIO_LABEL}, x{variant_count}, {VIDEO_MODEL_LABEL})...")
+async def ensure_video_mode(page, worker_id: Any, variant_count: int, source_label: str = VIDEO_SOURCE_LABEL, aspect_ratio: str = DEFAULT_ASPECT_RATIO, model_label: str = DEFAULT_MODEL_LABEL) -> None:
+    """确保底部配置为视频、来源(source_label)、比例(aspect_ratio)、xN、模型(model_label)。"""
+    logger.info(f"[Worker {worker_id}] 正在设置视频配置 ({source_label}, {aspect_ratio}, x{variant_count}, {model_label})...")
 
     try:
         await asyncio.sleep(2)
@@ -410,19 +419,21 @@ async def ensure_video_mode(page, worker_id: Any, variant_count: int) -> None:
             page,
             menu,
             1,
-            re.compile(rf"{re.escape(VIDEO_SOURCE_LABEL)}|chrome_extension", re.IGNORECASE),
+            re.compile(rf"{re.escape(source_label)}", re.IGNORECASE),
             worker_id,
-            f"来源 {VIDEO_SOURCE_LABEL}",
+            f"来源 {source_label}",
         )
 
         # 第 3 组：比例
+        aspect_ratio_crop_map = {"9:16": "crop_9_16", "16:9": "crop_16_9"}
+        aspect_ratio_crop = aspect_ratio_crop_map.get(aspect_ratio, "crop_9_16")
         await select_tab_in_group(
             page,
             menu,
             2,
-            re.compile(rf"{re.escape(VIDEO_ASPECT_RATIO_LABEL)}|crop_9_16", re.IGNORECASE),
+            re.compile(rf"{re.escape(aspect_ratio)}|{re.escape(aspect_ratio_crop)}", re.IGNORECASE),
             worker_id,
-            f"比例 {VIDEO_ASPECT_RATIO_LABEL}",
+            f"比例 {aspect_ratio}",
         )
 
         # 第 4 组：变体数量
@@ -441,7 +452,7 @@ async def ensure_video_mode(page, worker_id: Any, variant_count: int) -> None:
         )
 
         # 模型选择
-        await ensure_video_model(page, menu, worker_id, VIDEO_MODEL_LABEL)
+        await ensure_video_model(page, menu, worker_id, model_label)
 
         # 关闭菜单
         if await menu.is_visible(timeout=500):
@@ -466,16 +477,16 @@ async def ensure_video_mode(page, worker_id: Any, variant_count: int) -> None:
 
         if "视频" not in selected_video_text and "videocam" not in selected_video_text.lower():
             raise RuntimeError(f"最终校验失败，模式不是视频: {selected_video_text}")
-        if VIDEO_SOURCE_LABEL not in selected_source_text and "chrome_extension" not in selected_source_text.lower():
-            raise RuntimeError(f"最终校验失败，来源不是 {VIDEO_SOURCE_LABEL}: {selected_source_text}")
-        if VIDEO_ASPECT_RATIO_LABEL not in selected_ratio_text and "crop_9_16" not in selected_ratio_text.lower():
-            raise RuntimeError(f"最终校验失败，比例不是 {VIDEO_ASPECT_RATIO_LABEL}: {selected_ratio_text}")
+        if source_label not in selected_source_text and "chrome_extension" not in selected_source_text.lower() and "crop_free" not in selected_source_text.lower():
+            raise RuntimeError(f"最终校验失败，来源不是 {source_label}: {selected_source_text}")
+        if aspect_ratio not in selected_ratio_text and aspect_ratio_crop not in selected_ratio_text.lower():
+            raise RuntimeError(f"最终校验失败，比例不是 {aspect_ratio}: {selected_ratio_text}")
         selected_variant_normalized = selected_variant_text.lower()
         expected_variant_values = {target_variant.lower(), f"{variant_count}x"}
         if selected_variant_normalized not in expected_variant_values:
             raise RuntimeError(f"最终校验失败，生成数量不是 {target_variant}: {selected_variant_text}")
-        if VIDEO_MODEL_LABEL.lower() not in selected_model_text.lower():
-            raise RuntimeError(f"最终校验失败，模型不是 {VIDEO_MODEL_LABEL}: {selected_model_text}")
+        if model_label.lower() not in selected_model_text.lower():
+            raise RuntimeError(f"最终校验失败，模型不是 {model_label}: {selected_model_text}")
 
         await page.keyboard.press("Escape")
         await human_delay(0.3, 0.6)
@@ -872,6 +883,152 @@ async def upload_reference_image_via_picker(
     logger.info(f"[Worker {worker_id}] 已将图片挂载到输入框: {attached_media_name}")
     return attached_media_name
 
+
+async def _find_frame_area(page, frame_type: str):
+    """定位帧模式下的起始/结束帧区域。
+
+    Args:
+        page: Playwright Page
+        frame_type: "起始" 或 "结束"
+    Returns:
+        Playwright Locator 或 None
+    """
+    frame_divs = page.locator('div[aria-haspopup="dialog"]')
+    count = await frame_divs.count()
+    for idx in range(count):
+        div = frame_divs.nth(idx)
+        try:
+            text = normalize_prompt_text(await div.inner_text())
+            if text == frame_type:
+                return div
+        except Exception:
+            continue
+    return None
+
+
+async def _open_frame_image_dialog(page, worker_id: Any, frame_type: str):
+    """点击帧模式下的起始/结束帧区域，打开图片选择对话框。
+
+    Args:
+        page: Playwright Page
+        worker_id: Worker ID (日志用)
+        frame_type: "起始" 或 "结束"
+    Returns:
+        dialog Locator
+    """
+    for attempt in range(4):
+        frame_area = await _find_frame_area(page, frame_type)
+        if not frame_area:
+            raise RuntimeError(f"未找到{frame_type}帧区域 (尝试 {attempt + 1}/4)")
+
+        await human_click(page, frame_area)
+        await human_delay(1, 2)
+        dialog = await _get_visible_create_image_dialog(page)
+        if dialog:
+            logger.info(f"[Worker {worker_id}] 已打开{frame_type}帧图片选择面板")
+            return dialog
+
+    raise RuntimeError(f"未成功打开{frame_type}帧图片选择面板")
+
+
+async def upload_frame_image_via_picker(
+    page,
+    worker_id: Any,
+    frame_type: str,
+    file_buffer: bytes,
+    file_name: str,
+    mime_type: str,
+) -> str:
+    """帧模式下上传图片到起始帧或结束帧。
+
+    Args:
+        page: Playwright Page
+        worker_id: Worker ID
+        frame_type: "起始" 或 "结束"
+        file_buffer: 图片二进制数据
+        file_name: 文件名
+        mime_type: MIME 类型
+    Returns:
+        上传后的 media name
+    """
+    dialog = await _open_frame_image_dialog(page, worker_id, frame_type)
+    upload_option = dialog.locator('div:has-text("上传图片"), li:has-text("上传图片"), button:has-text("上传图片")').last
+    if await upload_option.count() == 0:
+        raise RuntimeError(f"{frame_type}帧图片面板中未找到'上传图片'入口")
+
+    logger.info(f"[Worker {worker_id}] 正在上传{frame_type}帧图片: {file_name}")
+    async with page.expect_file_chooser(timeout=15000) as fc_info:
+        await human_click(page, upload_option)
+
+    file_chooser = await fc_info.value
+    async with page.expect_response(
+        lambda r: "uploadImage" in r.url and r.request.method == "POST",
+        timeout=90000,
+    ) as upload_info:
+        await file_chooser.set_files({
+            "name": file_name,
+            "mimeType": mime_type,
+            "buffer": file_buffer,
+        })
+
+    response = await upload_info.value
+    payload = await response.json()
+    response_media_name = (payload.get("media") or {}).get("name")
+    logger.info(f"[Worker {worker_id}] {frame_type}帧图片已上传: {response_media_name}")
+
+    await human_delay(2, 4)
+
+    visible_dialog = await _get_visible_create_image_dialog(page)
+    if visible_dialog:
+        try:
+            await page.keyboard.press("Escape")
+            await human_delay(0.3, 0.6)
+        except Exception:
+            pass
+
+    frame_mounted = await _wait_for_frame_image_mounted(page, worker_id, frame_type, timeout_ms=30000)
+    if frame_mounted:
+        logger.info(f"[Worker {worker_id}] {frame_type}帧图片已挂载确认")
+    else:
+        logger.warning(f"[Worker {worker_id}] {frame_type}帧图片挂载未确认，继续执行")
+
+    logger.info(f"[Worker {worker_id}] {frame_type}帧图片上传完成: {response_media_name}")
+    return response_media_name
+
+
+async def _wait_for_frame_image_mounted(
+    page,
+    worker_id: Any,
+    frame_type: str,
+    timeout_ms: int = 30000,
+) -> bool:
+    deadline = monotonic() + timeout_ms / 1000
+    frame_index = 0 if frame_type == "起始" else 1
+    while monotonic() < deadline:
+        try:
+            swap_btn = page.locator('button').filter(has_text="交换第一帧和最后一帧").first
+            if await swap_btn.count() > 0:
+                container = swap_btn.locator("xpath=..")
+                if await container.count() > 0:
+                    frame_divs = container.locator(":scope > div").filter(has=page.locator("img"))
+                    if await frame_divs.count() > frame_index:
+                        img = frame_divs.nth(frame_index).locator("img")
+                        if await img.count() > 0:
+                            return True
+        except Exception:
+            pass
+        try:
+            frame_area = await _find_frame_area(page, frame_type)
+            if frame_area:
+                img = frame_area.locator("img")
+                if await img.count() > 0:
+                    return True
+        except Exception:
+            pass
+        await human_delay(0.5, 1.0)
+    return False
+
+
 class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
     """Google Flow视频生成爬虫"""
 
@@ -1151,6 +1308,13 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
     async def _prepare_video_project(self, page, worker, prompt: str, variant_count: int,task_data) -> None:
         """按图片脚本的节奏进入项目页，并补上视频模式和提示词。"""
+        gen_type = int(task_data.get("gen_type", 1))
+        is_frame_mode = gen_type == 0
+        source_label = FRAME_SOURCE_LABEL if is_frame_mode else VIDEO_SOURCE_LABEL
+        proportion = int(task_data.get("proportion", 0))
+        aspect_ratio = PROPORTION_MAP.get(proportion, DEFAULT_ASPECT_RATIO)
+        model_type = int(task_data.get("model_type", 0))
+        model_label = MODEL_MAP.get(model_type, DEFAULT_MODEL_LABEL)
         # 检查并关闭底部 Cookie 弹窗
         try:
             cookie_btn = page.locator('.glue-cookie-notification-bar button:has-text("Got it"), .glue-cookie-notification-bar button:has-text("同意"), .glue-cookie-notification-bar button:has-text("Accept"), .glue-cookie-notification-bar button').first
@@ -1182,7 +1346,7 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
             raise RuntimeError(f"点击'新建项目'失败: {e}")
 
         # 确保视频模式和变体数量正确
-        await ensure_video_mode(page, worker.worker_id, variant_count)
+        await ensure_video_mode(page, worker.worker_id, variant_count, source_label=source_label, aspect_ratio=aspect_ratio, model_label=model_label)
 
         # 按人工路径上传参考图：打开图片面板 -> 上传 -> 等待约 10 秒 -> 点选新图 -> 退出
         upload_payloads: list[tuple[bytes, str, str]] = []
@@ -1269,20 +1433,37 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
         if upload_payloads:
             try:
-                total_upload_count = len(upload_payloads)
-                for upload_index, (file_buffer, current_file_name, current_mime_type) in enumerate(upload_payloads, start=1):
-                    logger.info(
-                        f"[Worker {worker.worker_id}] 正在上传第 {upload_index}/{total_upload_count} 张参考图"
-                    )
-                    await upload_reference_image_via_picker(
-                        page=page,
-                        worker_id=worker.worker_id,
-                        file_buffer=file_buffer,
-                        file_name=current_file_name,
-                        mime_type=current_mime_type,
-                    )
+                if is_frame_mode:
+                    total_upload_count = len(upload_payloads)
+                    frame_types = ["起始", "结束"]
+                    for upload_index, (file_buffer, current_file_name, current_mime_type) in enumerate(upload_payloads):
+                        frame_type = frame_types[upload_index] if upload_index < len(frame_types) else "起始"
+                        logger.info(
+                            f"[Worker {worker.worker_id}] 正在上传第 {upload_index + 1}/{total_upload_count} 张帧图片 ({frame_type}帧)"
+                        )
+                        await upload_frame_image_via_picker(
+                            page=page,
+                            worker_id=worker.worker_id,
+                            frame_type=frame_type,
+                            file_buffer=file_buffer,
+                            file_name=current_file_name,
+                            mime_type=current_mime_type,
+                        )
+                else:
+                    total_upload_count = len(upload_payloads)
+                    for upload_index, (file_buffer, current_file_name, current_mime_type) in enumerate(upload_payloads, start=1):
+                        logger.info(
+                            f"[Worker {worker.worker_id}] 正在上传第 {upload_index}/{total_upload_count} 张参考图"
+                        )
+                        await upload_reference_image_via_picker(
+                            page=page,
+                            worker_id=worker.worker_id,
+                            file_buffer=file_buffer,
+                            file_name=current_file_name,
+                            mime_type=current_mime_type,
+                        )
             except Exception as e:
-                logger.error(f"[Worker {worker.worker_id}] 按图片面板路径上传参考图失败: {e}")
+                logger.error(f"[Worker {worker.worker_id}] 上传图片失败: {e}")
                 raise
 
         # 等待输入框并输入提示词
@@ -1295,10 +1476,9 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
         await fill_textbox_with_validation(page, textbox_loc, input_prompt, worker.worker_id)
         await human_delay(1.0, 2.5)
 
-    async def _submit_video_generation_humanized(self, page, worker_id: Any) -> tuple[str, dict[str, Any]]:
+    async def _submit_video_generation_humanized(self, page, worker_id: Any, is_frame_mode: bool = False) -> tuple[str, dict[str, Any]]:
         """提交生成请求；如果首个响应没抓到，则等待页面自己的状态轮询。"""
         logger.info(f"[Worker {worker_id}] 等待提交按钮出现...")
-        # 并发导致输入提示词后，右侧提交按钮可能需要一小会儿才可点
         await human_delay(1.5, 3.0)
         
         submit_btn = page.locator("button").filter(has_text=re.compile(r"arrow_forward", re.IGNORECASE)).filter(has_text="创建").first
@@ -1308,25 +1488,66 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
         if not await submit_btn.is_visible(timeout=5000):
             raise RuntimeError("超时未找到真实可点击的创建提交按钮")
 
-        try:
-            async with page.expect_response(
-                lambda r: (
-                    r.request.method == "POST"
-                    and (
-                        "batchAsyncGenerateVideoText" in r.url
-                        or "batchAsyncGenerateVideoReferenceImages" in r.url
-                    )
-                ),
-                timeout=60000
-            ) as response_info:
-                await human_click(page, submit_btn)
-                await human_delay(0.5, 1.0)
-                await human_mouse_move(page)
+        if is_frame_mode:
+            api_matcher = lambda r: (
+                r.request.method == "POST"
+                and (
+                    "batchAsyncGenerateVideoStartImage" in r.url
+                    or "batchAsyncGenerateVideoStartAndEndImage" in r.url
+                    or "batchAsyncGenerateVideoText" in r.url
+                )
+            )
+        else:
+            api_matcher = lambda r: (
+                r.request.method == "POST"
+                and (
+                    "batchAsyncGenerateVideoText" in r.url
+                    or "batchAsyncGenerateVideoReferenceImages" in r.url
+                )
+            )
 
-            response = await response_info.value
-            return "submit", await response.json()
-        except Exception as submit_exc:
-            logger.info(f"[Worker {worker_id}] 未捕获到首个生成响应: {submit_exc}，改为等待页面状态轮询...")
+        submit_response_future: asyncio.Future = asyncio.get_running_loop().create_future()
+        captured_urls: list[str] = []
+
+        def _on_response(resp) -> None:
+            if submit_response_future.done():
+                return
+            try:
+                url = resp.url
+            except Exception:
+                return
+            if any(kw in url for kw in ("batchAsyncGenerateVideo", "batchCheckAsyncVideo")):
+                captured_urls.append(f"{resp.request.method} {url} [{resp.status}]")
+            if api_matcher(resp):
+                submit_response_future.set_result(resp)
+
+        page.on("response", _on_response)
+        try:
+            await human_click(page, submit_btn)
+            await human_delay(0.5, 1.0)
+            await human_mouse_move(page)
+
+            try:
+                response = await asyncio.wait_for(submit_response_future, timeout=60)
+                return "submit", await response.json()
+            except asyncio.TimeoutError:
+                if captured_urls:
+                    logger.info(
+                        f"[Worker {worker_id}] expect_response 超时，"
+                        f"期间收到的相关请求: {captured_urls}"
+                    )
+                else:
+                    logger.info(
+                        f"[Worker {worker_id}] expect_response 超时，"
+                        f"期间未收到任何 batchAsyncGenerate/batchCheck 请求"
+                    )
+        finally:
+            try:
+                page.remove_listener("response", _on_response)
+            except Exception:
+                pass
+
+        logger.info(f"[Worker {worker_id}] 改为等待页面状态轮询...")
 
         async with page.expect_response(
             lambda r: "batchCheckAsyncVideoGenerationStatus" in r.url and r.request.method == "POST",
@@ -1338,13 +1559,13 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
         response = await status_info.value
         return "status", await response.json()
 
-        raise RuntimeError("未捕获到首个生成响应，且未等到页面状态轮询")
-
     async def process_task(self, page, task_data: dict[str, Any], worker) -> dict[str, Any]:
         prompt = task_data.get("prompt")
         variant_count = int(task_data.get("variant_count", 1))
         poll_timeout_ms = int(task_data.get("poll_timeout_ms", 8 * 60 * 1000))
-        task_id: str | None = task_data.get("id")  # 调用方提供的任务 ID（可选）
+        task_id: str | None = task_data.get("id")
+        gen_type = int(task_data.get("gen_type", 1))
+        is_frame_mode = gen_type == 0
 
 
         # ── 写入 MongoDB：任务开始 ─────────────────────────────────────────────
@@ -1368,7 +1589,7 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
             media_name = None
             project_id = None
-            response_kind, response_payload = await self._submit_video_generation_humanized(page, worker.worker_id)
+            response_kind, response_payload = await self._submit_video_generation_humanized(page, worker.worker_id, is_frame_mode=is_frame_mode)
 
             try:
                 logger.info(f"[Worker {worker.worker_id}] 收到{response_kind}响应")
@@ -1502,13 +1723,13 @@ async def main():
 
     scraper = GoogleFlowVideoScraperV2(
         browser_pool_size=1,
-        headless=True,
+        headless=False,
         extra_flags=["--start-maximized"],
         viewport={"width": 0, "height": 0},
         task_timeout_ms=12 * 60 * 1000
     )
 
-    medical_prompt =  "基于这些图片生成关于打代码的视频"
+    medical_prompt =  "基于第一张图片生成关于打代码的视频"
 
     # 为了测试 Base64 内存直传，先在外部读取文件转为 base64
     import base64
@@ -1524,6 +1745,9 @@ async def main():
         "variant_count": 1,
         "email": email,
         "cookies": cookies,
+        "gen_type":1,
+        "proportion": 1,        # 0=9:16, 1=16:9
+        "model_type": 1,
         "image_base64_list": [img_b64,pending_img_b64],
     }]
     async with scraper:
