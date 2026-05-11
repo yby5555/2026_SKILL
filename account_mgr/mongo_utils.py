@@ -126,3 +126,22 @@ def mark_pending(col, email: str, reason: str = "") -> None:
             "updated_at": datetime.now(timezone.utc),
         }},
     )
+
+
+def mark_expired_to_pending(col, email: str) -> bool:
+    """
+    Cookie 过期 / 失效时调用：仅当 status=1（active）时才重置为 0（pending）。
+
+    条件限制：避免覆盖正在处理中 (-1) 或已标记异常 (2) 的账号。
+    Returns: True 表示成功重置，False 表示状态不符（跳过）。
+    """
+    result = with_mongo_retry(
+        col.update_one,
+        {"email": email, "status": STATUS_ACTIVE},
+        {"$set": {
+            "status":     STATUS_PENDING,
+            "status_msg": "Cookie 失效（TTL 过期或消费者上报），触发重新登录",
+            "updated_at": datetime.now(timezone.utc),
+        }},
+    )
+    return result.modified_count > 0

@@ -648,9 +648,11 @@ class MultiBrowserScraperBase:
         """
         task = self.normalize_task(task_data)
         worker_record: BrowserWorker | None = None
+        context_id = 0
         try:
             worker_record = await self._acquire_worker()
-            worker_context = self._build_worker_context(worker_record)
+            context_id = self._worker_active_counts.get(worker_record.worker_id, 1) - 1
+            worker_context = self._build_worker_context(worker_record, context_id)
             result = await self._run_worker_task(worker_record, task, worker_context)
             worker_record.record_success()
             return result
@@ -659,7 +661,7 @@ class MultiBrowserScraperBase:
                 failure_category = await self.classify_failure(
                     exc,
                     task,
-                    worker=self._build_worker_context(worker_record),
+                    worker=self._build_worker_context(worker_record, context_id),
                 )
                 worker_record.record_failure(failure_category)
             raise
@@ -758,7 +760,7 @@ class MultiBrowserScraperBase:
                 self._workers_recycling.discard(worker.worker_id)
                 self._pool_condition.notify_all()
 
-    def _build_worker_context(self, worker: BrowserWorker) -> WorkerContext:
+    def _build_worker_context(self, worker: BrowserWorker, context_id: int = 0) -> WorkerContext:
         """基于当前 worker 状态构建运行时快照。
 
         功能:
@@ -768,6 +770,8 @@ class MultiBrowserScraperBase:
         参数:
             worker:
                 当前 worker 实例。
+            context_id:
+                当前任务在所属浏览器内分配的上下文序号。
 
         返回:
             WorkerContext:
@@ -779,6 +783,7 @@ class MultiBrowserScraperBase:
             active_tasks=self._worker_active_counts.get(worker.worker_id, 0),
             tasks_since_recycle=worker.tasks_since_recycle,
             consecutive_failures=worker.consecutive_failures,
+            context_id=context_id,
         )
 
     def _resolve_task_timeout_ms(self, task_timeout_ms: int | None) -> int | None:

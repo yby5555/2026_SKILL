@@ -15,7 +15,7 @@ import logging.handlers
 import sys
 from pathlib import Path
 
-_log_dir = Path(__file__).resolve().parent.parent / "flow" / "log"
+_log_dir = Path(__file__).resolve().parent.parent / "video_processing" / "log"
 _log_dir.mkdir(parents=True, exist_ok=True)
 _log_file = _log_dir / "automation_video.log"
 
@@ -167,7 +167,7 @@ def get_presigned_url(cos_key: str, expire_time: int = 3600) -> str | None:
     生成 COS 对象的预签名下载 URL（带时效，私有 Bucket 场景下使用）。
 
     Args:
-        cos_key:     COS 对象的完整 Key（含路径，如 flow/videos/xxx.mp4）
+        cos_key:     COS 对象的完整 Key（含路径，如 video_processing/videos/xxx.mp4）
         expire_time: 链接有效期，单位秒，默认 3600（1 小时）
 
     Returns:

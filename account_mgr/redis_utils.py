@@ -17,6 +17,7 @@ from config import (
     REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD,
     REDIS_COOKIE_KEY, REDIS_POOL_KEY, COOKIE_TTL,
     REDIS_INUSE_KEY, MAX_CONCURRENT_PER_ACCOUNT,
+    REDIS_RETRY_QUEUE,
 )
 
 
@@ -59,6 +60,27 @@ async def push_cookie_to_redis(redis_client: aioredis.Redis, email: str, cookies
     await redis_client.lrem(REDIS_POOL_KEY, 0, email)
     await redis_client.rpush(REDIS_POOL_KEY, email)
     return await redis_client.llen(REDIS_POOL_KEY)
+
+
+async def pop_retry_emails(redis_client: aioredis.Redis, timeout: float = 5.0) -> list[str]:
+    """
+    异步 BLPOP 重试队列，返回所有可立即取出的 email。
+
+    先尝试非阻塞 LPOP 取一批，若空则 BLPOP 等待最多 timeout 秒。
+    调度器循环中反复调用此函数来监听失效账号。
+    """
+    emails = []
+    while True:
+        email = await redis_client.lpop(REDIS_RETRY_QUEUE)
+        if email:
+            emails.append(email)
+        else:
+            break
+    if not emails:
+        result = await redis_client.blpop(REDIS_RETRY_QUEUE, timeout=timeout)
+        if result:
+            emails.append(result[1])
+    return emails
 
 
 # ==================== 同步接口（消费方，供外部脚本使用） ====================
@@ -130,10 +152,12 @@ def get_next_cookie(max_attempts: int | None = None) -> tuple[str, list] | None:
         if not email:
             break
 
-        # Cookie 已过期 → 清理并跳过
+        # Cookie 已过期 → 清理、推入重试队列（去重）、跳过
         cookie_json = r.get(REDIS_COOKIE_KEY.format(email=email))
         if not cookie_json:
             r.lrem(REDIS_POOL_KEY, 0, email)
+            if not r.lpos(REDIS_RETRY_QUEUE, email):
+                r.rpush(REDIS_RETRY_QUEUE, email)
             continue
 
         # 原子检查并发槽位
@@ -188,3 +212,19 @@ def remove_from_pool(email: str) -> None:
     r.lrem(REDIS_POOL_KEY, 0, email)
     r.delete(REDIS_COOKIE_KEY.format(email=email))
     r.delete(REDIS_INUSE_KEY.format(email=email))  # 防止槽位泄漏
+
+
+def report_cookie_invalid(email: str) -> None:
+    """
+    消费者调用：主动上报某个账号的 Cookie 已失效。
+
+    做三件事：
+        1. 从 Pool 移除 + 清理 data / inuse key
+        2. 推入重试队列 flow:cookie:retry_queue（已去重）
+    """
+    r = _get_sync_redis()
+    r.lrem(REDIS_POOL_KEY, 0, email)
+    r.delete(REDIS_COOKIE_KEY.format(email=email))
+    r.delete(REDIS_INUSE_KEY.format(email=email))
+    if not r.lpos(REDIS_RETRY_QUEUE, email):
+        r.rpush(REDIS_RETRY_QUEUE, email)

@@ -103,6 +103,7 @@ class BrowserWorker:
         self.tasks_since_recycle = 0
         self.consecutive_failures = 0
         self.request_recycle = False
+        self._context_counter = 0
 
     async def ensure_started(self) -> None:
         """确保 worker 底层浏览器已经启动。
@@ -200,6 +201,7 @@ class BrowserWorker:
         self.tasks_since_recycle = 0
         self.consecutive_failures = 0
         self.request_recycle = False
+        self._context_counter = 0
 
     async def recycle_if_needed(self, *, active_tasks: int) -> None:
         """在满足条件时回收浏览器。

@@ -36,9 +36,9 @@ from pathlib import Path
 from typing import Any
 
 # 添加项目路径 - 直接添加 session_context_base 的目录
-_base_dir = Path(__file__).parent.parent / "zdh_base"
-if str(_base_dir) not in sys.path:
-    sys.path.insert(0, str(_base_dir))
+# _base_dir = Path(__file__).parent.parent / "zdh_base"
+# if str(_base_dir) not in sys.path:
+#     sys.path.insert(0, str(_base_dir))
 
 # 直接导入 session_context_base（绕过 zdh_base.__init__ 的导入问题）
 from session_context_base import BaseSessionContextScraper, load_cookies

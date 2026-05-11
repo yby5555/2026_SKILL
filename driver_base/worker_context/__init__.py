@@ -30,6 +30,9 @@ class WorkerContext:
             自上次浏览器重建以来，该 worker 已执行的任务数。
         consecutive_failures:
             当前 worker 连续失败的次数。
+        context_id:
+            当前任务在所属浏览器内分配的上下文序号（从 0 开始），
+            可用于日志中区分同一浏览器上的多个并发 context。
     """
 
     worker_id: int
@@ -37,3 +40,4 @@ class WorkerContext:
     active_tasks: int
     tasks_since_recycle: int
     consecutive_failures: int
+    context_id: int = 0

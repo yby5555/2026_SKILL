@@ -40,8 +40,9 @@ from mongo_utils import (
     create_mongo_client, get_collection,
     reset_stale_processing, claim_account,
     mark_active, mark_abnormal, mark_pending,
+    mark_expired_to_pending,
 )
-from redis_utils import create_async_redis, push_cookie_to_redis
+from redis_utils import create_async_redis, push_cookie_to_redis, pop_retry_emails
 from flow_login import login_and_get_flow_cookies
 
 
@@ -227,6 +228,42 @@ async def refresh_non_active_accounts(col) -> int:
     return result.modified_count
 
 
+async def retry_listener(col, wakeup_event: asyncio.Event) -> None:
+    """
+    后台协程：持续监听 Redis 重试队列。
+    每取到一批 email，就重置其 MongoDB status → 0（pending），
+    然后 wakeup_event.set() 唤醒主循环立即执行登录。
+    """
+    log.info("[重试监听器] 已启动，等待失效账号...")
+    while True:
+        try:
+            emails = await pop_retry_emails(_redis, timeout=5.0)
+        except asyncio.CancelledError:
+            log.info("[重试监听器] 被取消，退出")
+            raise
+        except Exception as e:
+            log.error(f"[重试监听器] pop 异常: {e}")
+            await asyncio.sleep(5)
+            continue
+
+        if not emails:
+            continue
+
+        reset_count = 0
+        for email in emails:
+            try:
+                if mark_expired_to_pending(col, email):
+                    log.info(f"[重试监听器] {email} → status=0（Cookie 失效，触发重新登录）")
+                    reset_count += 1
+                else:
+                    log.debug(f"[重试监听器] {email} 状态非 active，跳过")
+            except Exception as e:
+                log.error(f"[重试监听器] 重置 {email} 失败: {e}")
+
+        if reset_count > 0:
+            wakeup_event.set()
+
+
 async def run_daemon(col, interval: int) -> None:
     """主调度循环（永久运行直到 Ctrl+C）"""
     log.info("=" * 60)
@@ -241,47 +278,63 @@ async def run_daemon(col, interval: int) -> None:
     if count:
         log.info(f"已重置 {count} 个遗留处理中账号 (status=-1 → 0)")
 
+    # 即时唤醒事件 + 重试监听器后台协程
+    wakeup_event = asyncio.Event()
+    listener_task = asyncio.create_task(retry_listener(col, wakeup_event))
+
     # 分别记录早班和晚班上次刷新的日期
     _last_refresh_morning: date | None = None
     _last_refresh_afternoon: date | None = None
 
-    while True:
-        now = datetime.now()
-        log.info(f"--- 新一轮检查 [{now.strftime('%Y-%m-%d %H:%M:%S')}] ---")
-        write_heartbeat()
+    try:
+        while True:
+            now = datetime.now()
+            log.info(f"--- 新一轮检查 [{now.strftime('%Y-%m-%d %H:%M:%S')}] ---")
+            write_heartbeat()
 
-        # ── 每日 06:00 早班刷新 ─────────────────────────────────────────
-        # 条件：当前小时在 6 到 17 之间，且今天尚未触发过早班刷新
-        if 6 <= now.hour < 18 and _last_refresh_morning != now.date():
-            log.info("[早班刷新] 到达 06:00 窗口，普通执行一次：重置所有活跃账号(status=1)...")
+            # ── 每日 06:00 早班刷新 ─────────────────────────────────────────
+            if 6 <= now.hour < 18 and _last_refresh_morning != now.date():
+                log.info("[早班刷新] 到达 06:00 窗口，普通执行一次：重置所有活跃账号(status=1)...")
+                try:
+                    refreshed = await refresh_active_accounts(col)
+                    _last_refresh_morning = now.date()
+                    log.info(f"[早班刷新] 已重置 {refreshed} 个活跃账号 (status=1 → 0)，等待重新获取 Cookie")
+                except Exception as e:
+                    log.error(f"[早班刷新] 异常: {e}", exc_info=True)
+            # ────────────────────────────────────────────────────────────────
+
+            # ── 每日 18:00 晚班刷新 ─────────────────────────────────────────
+            if now.hour >= 18 and _last_refresh_afternoon != now.date():
+                log.info("[晚班刷新] 到达 18:00 窗口，重试异常账号：重置所有非活跃账号(status!=1)...")
+                try:
+                    refreshed = await refresh_non_active_accounts(col)
+                    _last_refresh_afternoon = now.date()
+                    log.info(f"[晚班刷新] 已重置 {refreshed} 个非活跃账号 (status!=1 → 0)，准备重试登录")
+                except Exception as e:
+                    log.error(f"[晚班刷新] 异常: {e}", exc_info=True)
+            # ────────────────────────────────────────────────────────────────
+
             try:
-                refreshed = await refresh_active_accounts(col)
-                _last_refresh_morning = now.date()
-                log.info(f"[早班刷新] 已重置 {refreshed} 个活跃账号 (status=1 → 0)，等待重新获取 Cookie")
+                await run_once(col)
             except Exception as e:
-                log.error(f"[早班刷新] 异常: {e}", exc_info=True)
-        # ────────────────────────────────────────────────────────────────
+                log.error(f"本轮检查异常: {e}", exc_info=True)
 
-        # ── 每日 18:00 晚班刷新 ─────────────────────────────────────────
-        # 条件：当前小时 >= 18，且今天尚未触发过晚班刷新
-        if now.hour >= 18 and _last_refresh_afternoon != now.date():
-            log.info("[晚班刷新] 到达 18:00 窗口，重试异常账号：重置所有非活跃账号(status!=1)...")
+            write_heartbeat()
+            log.info(f"等待 {interval}s 后下次检查（失效账号可随时唤醒）...")
+            wakeup_event.clear()
+
+            # 用 Event.wait 替代 asyncio.sleep，可被 retry_listener 即时唤醒
             try:
-                refreshed = await refresh_non_active_accounts(col)
-                _last_refresh_afternoon = now.date()
-                log.info(f"[晚班刷新] 已重置 {refreshed} 个非活跃账号 (status!=1 → 0)，准备重试登录")
-            except Exception as e:
-                log.error(f"[晚班刷新] 异常: {e}", exc_info=True)
-        # ────────────────────────────────────────────────────────────────
-
+                await asyncio.wait_for(wakeup_event.wait(), timeout=interval)
+                log.info("⚡ 收到即时唤醒信号，立即开始新一轮！")
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        listener_task.cancel()
         try:
-            await run_once(col)
-        except Exception as e:
-            log.error(f"本轮检查异常: {e}", exc_info=True)
-
-        write_heartbeat()
-        log.info(f"等待 {interval}s 后下次检查...")
-        await asyncio.sleep(interval)
+            await listener_task
+        except asyncio.CancelledError:
+            pass
 
 
 async def main_async() -> None:

@@ -2,7 +2,7 @@
 Cookie 消费工具 - 从 Redis 中以 Round-Robin 方式获取可用的 Flow Cookie
 
 用法：
-    from cookie_reader import get_next_cookie, get_pool_status
+    from cookie_reader import get_next_cookie, get_pool_status, report_cookie_invalid
 
     # 获取下一个可用 Cookie
     result = get_next_cookie()
@@ -13,6 +13,9 @@ Cookie 消费工具 - 从 Redis 中以 Round-Robin 方式获取可用的 Flow Co
     # 查看 Pool 状态
     status = get_pool_status()
     print(status)  # {"pool_size": 3, "active": [...], "expired": [...]}
+
+    # 使用完毕后发现 Cookie 失效，立即上报触发重新登录
+    report_cookie_invalid(email)
 """
 
 import sys
@@ -20,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 # 直接从 redis_utils 导出，保持接口一致
-from redis_utils import get_next_cookie, get_pool_status, remove_from_pool  # noqa: F401
+from redis_utils import get_next_cookie, get_pool_status, remove_from_pool, report_cookie_invalid  # noqa: F401
 
 
 if __name__ == "__main__":
