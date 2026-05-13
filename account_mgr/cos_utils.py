@@ -5,6 +5,7 @@
     pip install cos-python-sdk-v5
 """
 
+import re
 import time
 from pathlib import Path
 
@@ -186,3 +187,31 @@ def get_presigned_url(cos_key: str, expire_time: int = 3600) -> str | None:
     except Exception as e:
         logger.info(f"[COS] 生成预签名链接失败: {e}")
         return None
+
+
+_COS_URL_PATTERN = re.compile(r"^https://([^.]+-\d+)\.cos\.([^.]+)\.myqcloud\.com/(.+?)(\?|$)")
+
+
+def is_cos_url(url: str) -> bool:
+    return bool(_COS_URL_PATTERN.match(url))
+
+
+def download_cos_image(url: str) -> bytes:
+    m = _COS_URL_PATTERN.match(url)
+    if not m:
+        raise ValueError(f"不是合法的 COS URL: {url[:80]}...")
+
+    bucket, region, key, _ = m.groups()
+    client = _get_client()
+
+    for attempt in range(3):
+        try:
+            response = client.get_object(Bucket=bucket, Key=key)
+            data = response["Body"].get_raw_stream().read()
+            logger.info(f"[COS] 下载成功: {key} ({len(data)} bytes)")
+            return data
+        except Exception as exc:
+            logger.warning(f"[COS] 下载第 {attempt + 1} 次失败: {key}, {exc}")
+            if attempt < 2:
+                time.sleep(1)
+    raise RuntimeError(f"COS 下载失败，已重试 3 次: {key}")

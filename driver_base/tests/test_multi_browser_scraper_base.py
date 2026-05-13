@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import unittest
+from unittest.mock import patch
 
 from driver_base import FailureCategory, MultiBrowserScraperBase
 
@@ -134,6 +135,39 @@ class MultiBrowserScraperBaseTests(unittest.IsolatedAsyncioTestCase):
         """
         module = importlib.import_module("driver_base")
         self.assertIs(MultiBrowserScraperBase, module.MultiBrowserScraperBase)
+
+    def test_context_options_use_consistent_fingerprint_headers(self):
+        """验证 context 选项包含真实化 UA/语言/时区配置。"""
+        scraper = ClassificationScraper(
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/145.0.0.0 Safari/537.36"
+            ),
+        )
+
+        options = scraper.build_context_options(DummyWorker(), None)
+
+        self.assertEqual(options["locale"], "zh-CN")
+        self.assertEqual(options["timezone_id"], "Asia/Shanghai")
+        self.assertIn("Chrome/145", options["user_agent"])
+        self.assertIn('v="145"', options["extra_http_headers"]["Sec-Ch-Ua"])
+        self.assertEqual(options["extra_http_headers"]["Sec-Ch-Ua-Platform"], '"Windows"')
+
+    def test_default_user_agent_uses_random_pool_when_not_explicitly_provided(self):
+        with patch(
+            "driver_base.multi_browser_scraper_base.random.choice",
+            return_value=("147", "0", "0", "0"),
+        ):
+            scraper = ClassificationScraper()
+
+        options = scraper.build_context_options(DummyWorker(), None)
+
+        self.assertIn("Chrome/147.0.0.0", scraper.user_agent)
+        self.assertIn("Chrome/147.0.0.0", options["user_agent"])
+        self.assertIn('v="147"', options["extra_http_headers"]["Sec-Ch-Ua"])
 
     async def test_classify_failure_maps_core_categories(self):
         """验证失败分类逻辑能覆盖核心异常场景。

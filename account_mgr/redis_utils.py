@@ -77,7 +77,7 @@ async def pop_retry_emails(redis_client: aioredis.Redis, timeout: float = 5.0) -
         else:
             break
     if not emails:
-        result = await redis_client.blpop(REDIS_RETRY_QUEUE, timeout=timeout)
+        result = await redis_client.blpop(REDIS_RETRY_QUEUE, timeout=int(timeout))
         if result:
             emails.append(result[1])
     return emails

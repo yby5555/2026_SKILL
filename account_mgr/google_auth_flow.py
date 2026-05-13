@@ -272,7 +272,7 @@ class GoogleAuthScraper(BaseSessionContextScraper):
             print("[INFO] 已点击下一步（密码）")
 
             # 等待页面跳转
-            await self.human.random_pause(2.0, 3.0)
+            await self.human.random_pause(8.0, 15.0)
 
             # 4. 处理 2FA（如果有）
             if totp_key:

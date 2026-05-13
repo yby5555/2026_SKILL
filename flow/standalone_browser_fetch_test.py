@@ -342,7 +342,7 @@ async def main() -> None:
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False, args=["--start-maximized"])
+            browser = await p.chromium.launch(headless=True, args=["--start-maximized"])
             context = await browser.new_context(storage_state={"cookies": cookies}, viewport=None)
             page = await context.new_page()
 
@@ -350,10 +350,10 @@ async def main() -> None:
             project_id = await create_project(page)
             print("project_id:", project_id)
 
-            prompt = "第一张是我传入的人物图片，第二张是代码，帮我生成这个人物边喝酒边打代码"
+            prompt = "基于我这两张图片生成转场视频"
             reference_images = [
-                Path(r"D:\2026_SKILL\flow\1ad0fd6709f24b3ebc7ca0da7a44e698.png"),
-                Path(r"D:\2026_SKILL\flow\videos\pending\image.png"),
+                Path(r"D:\2026_SKILL\flow\生成一张赛博朋克的孙悟空_2K_202605091728.jpeg"),
+                Path(r"D:\2026_SKILL\flow\生成一张赛博朋克的猪八戒_2K_202605091728.jpeg"),
 
             ]
             reference_image_paths = normalize_reference_image_paths(reference_images)

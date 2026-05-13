@@ -12,6 +12,7 @@ import os
 import random
 import re
 import sys
+import time
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -34,7 +35,8 @@ from account_checker import (
     MIN_CREDITS_THRESHOLD,
     _click_avatar_and_get_credits,
 )
-from account_mgr.redis_utils import get_next_cookie, release_cookie, remove_from_pool
+from account_mgr.redis_utils import get_next_cookie, get_pool_status, release_cookie, remove_from_pool
+from account_mgr.cos_utils import download_cos_image, is_cos_url
 
 _LOG_DIR = _ROOT / "flow" / "log"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -455,7 +457,11 @@ def _derive_image_upload_meta(image_url: str | None, image_base64: str | None) -
         parsed = urlparse(image_url)
         extracted_name = Path(unquote(parsed.path)).name
         if extracted_name:
-            file_name = extracted_name
+            if is_cos_url(image_url):
+                guessed_ext = os.path.splitext(extracted_name)[1] or ".png"
+                file_name = f"image{guessed_ext}"
+            else:
+                file_name = extracted_name
         guessed_mime, _ = mimetypes.guess_type(file_name)
         if guessed_mime:
             mime_type = guessed_mime
@@ -864,11 +870,40 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
     def normalize_task(self, task_data: dict[str, Any]) -> dict[str, Any]:
         task_copy = dict(task_data)
+
+        image_urls = task_copy.get("image_url_list") or []
+        image_url = task_copy.get("image_url")
+
+        if image_urls and all(is_cos_url(u) for u in image_urls if u):
+            base64_list = []
+            for u in image_urls:
+                if u:
+                    base64_list.append(base64.b64encode(download_cos_image(u)).decode("utf-8"))
+            task_copy["image_base64_list"] = base64_list
+            task_copy.pop("image_url_list", None)
+        elif image_url and is_cos_url(image_url):
+            task_copy["image_base64"] = base64.b64encode(download_cos_image(image_url)).decode("utf-8")
+            task_copy.pop("image_url", None)
+
         if not task_copy.get("email") or not task_copy.get("cookies"):
-            next_result = get_next_cookie()
-            if not next_result:
-                raise RuntimeError("Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py")
-            task_copy["email"], task_copy["cookies"] = next_result
+            deadline = time.time() + 120
+            while True:
+                next_result = get_next_cookie()
+                if next_result:
+                    task_copy["email"], task_copy["cookies"] = next_result
+                    break
+
+                status = get_pool_status()
+                if not status["active"]:
+                    raise RuntimeError("Redis Cookie Pool 为空，无法启动任务，请先运行 login_scheduler.py")
+
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"Cookie 槽位等待超时（120s），"
+                        f"池中 {len(status['active'])} 个活跃账号均被占满"
+                    )
+
+                time.sleep(3)
         return task_copy
 
     async def _ensure_account_healthy(self, page, task_data: dict[str, Any], worker) -> None:
@@ -979,7 +1014,7 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
         raise TimeoutError(f"等待视频生成超时，最后一次状态: {last_statuses}")
 
-    async def _download_video_to_local(self, page, download_url: str, worker_id: Any, cookies: list, save_path: str) -> bool:
+    async def _download_video_to_local(self, page, download_url: str, worker_id: Any, cookies: list, save_path: str) -> tuple[bool, str]:
         await human_delay(4.0, 8.0)
         await human_mouse_move(page)
         await human_scroll(page)
@@ -996,9 +1031,11 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
                 "Sec-Fetch-Mode": "no-cors",
                 "Sec-Fetch-Site": "cross-site",
             }
+            video_mime_type = ""
             async with httpx.AsyncClient(timeout=180.0, verify=False, follow_redirects=True) as client:
                 async with client.stream("GET", download_url, cookies=cookie_dict, headers=headers) as response:
                     response.raise_for_status()
+                    video_mime_type = (response.headers.get("content-type") or "").split(";")[0].strip()
                     with open(save_path, "wb") as file_obj:
                         async for chunk in response.aiter_bytes(chunk_size=8192):
                             if chunk:
@@ -1006,14 +1043,14 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
             if os.path.exists(save_path) and os.path.getsize(save_path) > 1024:
                 kb_size = os.path.getsize(save_path) // 1024
-                logger.info(f"{_lp(worker_id)} 视频下载成功！大小: {kb_size} KB, URL: {download_url[:50]}...")
-                return True
+                logger.info(f"{_lp(worker_id)} 视频下载成功！大小: {kb_size} KB, MIME: {video_mime_type}, URL: {download_url[:50]}...")
+                return True, video_mime_type
 
             logger.error(f"{_lp(worker_id)} 下载文件似乎太小或不存在")
-            return False
+            return False, video_mime_type
         except Exception as exc:
             logger.error(f"{_lp(worker_id)} 下载视频到本地失败: {exc}")
-            return False
+            return False, ""
 
     async def _prepare_video_project(self, page, worker, prompt: str, variant_count: int, task_data: dict[str, Any]) -> None:
         gen_type = int(task_data.get("gen_type", 1))
@@ -1077,7 +1114,7 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
                         content_type = (resp.headers.get("content-type") or "").split(";")[0].strip()
                         if content_type.startswith("image/"):
                             mime_type = content_type
-                        upload_payloads.append((file_buffer, file_name, mime_type))
+                    upload_payloads.append((file_buffer, file_name, mime_type))
                 except Exception as exc:
                     logger.error(f"{_lp(worker.worker_id)} 从 URL 下载第 {idx} 张图片失败: {exc}")
                     preparation_errors.append(f"第 {idx} 张 URL 图片下载失败: {exc}")
@@ -1183,7 +1220,7 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
     async def _submit_video_generation_humanized(self, page, worker_id: Any, is_frame_mode: bool = False, log_prefix: str = "") -> tuple[str, dict[str, Any]]:
         lp = log_prefix or f"[Worker {worker_id}]"
         logger.info(f"{lp} 等待提交按钮出现...")
-        await human_delay(1.5, 3.0)
+        await human_delay(3, 5)
 
         submit_btn = page.locator("button").filter(
             has_text=re.compile(r"arrow_forward", re.IGNORECASE)
@@ -1229,6 +1266,7 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
         page.on("response", _on_response)
         try:
+            await human_delay(3, 5)
             await human_click(page, submit_btn)
             await human_delay(0.5, 1.0)
             await human_mouse_move(page)
@@ -1321,7 +1359,7 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
             os.makedirs(demo_dir, exist_ok=True)
             local_path = os.path.join(demo_dir, video_filename)
 
-            is_downloaded = await self._download_video_to_local(
+            is_downloaded, video_mime_type = await self._download_video_to_local(
                 page,
                 download_url,
                 worker.worker_id,
@@ -1335,13 +1373,14 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
             kb_size = file_size_bytes // 1024 if file_size_bytes >= 1024 else 1
             file_md5 = hashlib.md5(local_path.encode("utf-8")).hexdigest()
 
-            logger.info(f"{log_prefix} 视频下载成功！大小: {kb_size} KB, file_md5: {file_md5}")
+            logger.info(f"{log_prefix} 视频下载成功！大小: {kb_size} KB, MIME: {video_mime_type}, file_md5: {file_md5}")
 
             return {
                 "local_video_path": str(local_path),
                 "api_full_response": final_status_payload.get("api_full_response"),
                 "file_md5": file_md5,
                 "filesize": kb_size,
+                "video_mime_type": video_mime_type,
             }
         except Exception:
             raise

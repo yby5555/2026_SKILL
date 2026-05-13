@@ -108,6 +108,75 @@ class BrowserWorkerHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(worker._browser, healthy_browser)
         session_cls.assert_not_called()
 
+    async def test_context_options_factory_is_merged_into_stealth_session_context(self):
+        worker = BrowserWorker(
+            worker_id=1,
+            max_contexts=1,
+            navigation_timeout_ms=1000,
+            launch_options_factory=lambda worker: {},
+            context_options_factory=lambda worker, proxy=None: {
+                "locale": "zh-CN",
+                "timezone_id": "Asia/Shanghai",
+                "user_agent": "UA",
+                "extra_http_headers": {"Accept-Language": "zh-CN,zh;q=0.9"},
+            },
+            create_cookies_payload=_create_cookies_payload,
+            initialize_context=_initialize_context,
+            initialize_page=_initialize_page,
+            process_task=_process_task,
+            recycle_after_tasks=None,
+            recycle_after_failures=None,
+        )
+        session = FakeSession(browser=FakeBrowser(connected=True, version="124.0"))
+        session._context_options = {"base": "kept"}
+
+        with patch("driver_base.browser_worker.AsyncStealthySession", return_value=session), patch.dict(
+            "os.environ", {"FLOW_FORCE_CONTEXT_FINGERPRINT": "1"}
+        ):
+            await worker.ensure_started()
+
+            resolved = worker._resolve_context_options(proxy=None)
+
+        self.assertEqual(resolved["base"], "kept")
+        self.assertEqual(resolved["locale"], "zh-CN")
+        self.assertEqual(resolved["timezone_id"], "Asia/Shanghai")
+        self.assertEqual(resolved["user_agent"], "UA")
+        self.assertEqual(resolved["extra_http_headers"]["Accept-Language"], "zh-CN,zh;q=0.9")
+
+    async def test_context_options_merge_fingerprint_when_requested_differs_from_session_defaults(self):
+        worker = BrowserWorker(
+            worker_id=1,
+            max_contexts=1,
+            navigation_timeout_ms=1000,
+            launch_options_factory=lambda worker: {},
+            context_options_factory=lambda worker, proxy=None: {
+                "locale": "en-US",
+                "timezone_id": "UTC",
+                "user_agent": "UA-148",
+                "extra_http_headers": {"Sec-Ch-Ua": '"Chromium";v="148"'},
+            },
+            create_cookies_payload=_create_cookies_payload,
+            initialize_context=_initialize_context,
+            initialize_page=_initialize_page,
+            process_task=_process_task,
+            recycle_after_tasks=None,
+            recycle_after_failures=None,
+        )
+        session = FakeSession(browser=FakeBrowser(connected=True, version="124.0"))
+        session._context_options = {
+            "user_agent": "UA-OLD",
+            "extra_http_headers": {"Sec-Ch-Ua": '"Chromium";v="124"'},
+        }
+
+        with patch("driver_base.browser_worker.AsyncStealthySession", return_value=session), patch.dict(
+            "os.environ", {}, clear=False
+        ):
+            await worker.ensure_started()
+            resolved = worker._resolve_context_options(proxy=None)
+
+        self.assertEqual(resolved["user_agent"], "UA-148")
+        self.assertEqual(resolved["extra_http_headers"]["Sec-Ch-Ua"], '"Chromium";v="148"')
+
 
 if __name__ == "__main__":
     unittest.main()

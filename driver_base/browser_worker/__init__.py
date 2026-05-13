@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import types
 from typing import Any
 
@@ -157,6 +158,24 @@ class BrowserWorker:
                     这样既能复用默认配置，也能做到任务级代理切换。
                 """
                 context_options = session_self._context_options.copy()
+                requested_options = self._context_options_factory(self, proxy)
+                force_context_fingerprint = os.getenv("FLOW_FORCE_CONTEXT_FINGERPRINT", "").lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                requested_fingerprint_differs = any(
+                    requested_options.get(key) != context_options.get(key)
+                    for key in ("user_agent", "extra_http_headers")
+                    if key in requested_options
+                )
+                if force_context_fingerprint or requested_fingerprint_differs:
+                    context_options.update(requested_options)
+                else:
+                    for key in ("locale", "timezone_id", "viewport", "screen", "ignore_https_errors"):
+                        if key in requested_options:
+                            context_options[key] = requested_options[key]
                 if proxy:
                     context_options["proxy"] = construct_proxy_dict(proxy)
                 return context_options

@@ -1723,7 +1723,7 @@ async def main():
 
     scraper = GoogleFlowVideoScraperV2(
         browser_pool_size=1,
-        headless=False,
+        headless=True,
         extra_flags=["--start-maximized"],
         viewport={"width": 0, "height": 0},
         task_timeout_ms=12 * 60 * 1000

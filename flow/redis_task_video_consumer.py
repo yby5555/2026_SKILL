@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -77,6 +77,7 @@ def upsert_task_generation_result(
     api_full_response: str,
     file_md5: str | None = None,
     filesize: int | None = None,
+    mime: str | None = None,
 ) -> None:
     task_id = str(task["_id"])
     update_fields: dict[str, Any] = {
@@ -87,6 +88,8 @@ def upsert_task_generation_result(
         update_fields["file_md5"] = file_md5
     if filesize is not None:
         update_fields["filesize"] = filesize
+    if mime is not None:
+        update_fields["mime"] = mime
 
     collection.update_one(
         {"_id": task_id},
@@ -185,10 +188,11 @@ async def handle_single_task(scraper: GoogleFlowVideoScraperV2, collection: Any,
     api_full_response = raw_result.get("api_full_response")
     file_md5 = raw_result.get("file_md5")
     filesize = raw_result.get("filesize")
-    
+    video_mime_type = raw_result.get("video_mime_type")
+
     if not downloaded_path:
         raise RuntimeError("未能从结果中获取到 downloaded_path，视频生成可能失败")
-        
+
     upsert_task_generation_result(
         collection=collection,
         task=task,
@@ -196,6 +200,7 @@ async def handle_single_task(scraper: GoogleFlowVideoScraperV2, collection: Any,
         api_full_response=api_full_response,
         file_md5=file_md5,
         filesize=filesize,
+        mime=video_mime_type,
     )
     logger.info(f"[任务:{task_id}] 任务记录已更新, 视频路径: {downloaded_path}")
     return Path(downloaded_path) if downloaded_path else Path()

@@ -1,237 +1,140 @@
-"""
-OpenAI GPT Image API 图片生成
-支持模型: gpt-image-2, gpt-image-1
-文档: https://platform.openai.com/docs/guides/image-generation
-需要环境变量: OPENAI_API_KEY
-"""
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 import base64
-from pathlib import Path
-import httpx
-from openai import OpenAI
-BASE_URL = "https://sub2api.givemetoken.online/v1"
-API_KEY = "sk-d0d487c844ef1f8074a98e39c968ac5ee5d4464814b01856d5b6101182e41328"
+import mimetypes
+import time
 
-class _StealthTransport(httpx.HTTPTransport):
-    """移除 OpenAI SDK 的 X-Stainless-* 特征头，避免被 Cloudflare WAF 拦截。"""
-    _STRIP = {
-        "x-stainless-lang",
-        "x-stainless-package-version",
-        "x-stainless-os",
-        "x-stainless-arch",
-        "x-stainless-runtime",
-        "x-stainless-runtime-version",
-    }
+import requests
 
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        headers = httpx.Headers(
-            {k: v for k, v in request.headers.items() if k.lower() not in self._STRIP}
-        )
-        new_request = httpx.Request(
-            method=request.method,
-            url=request.url,
-            headers=headers,
-            content=request.content,
-            extensions=request.extensions,
-        )
-        new_request.headers["user-agent"] = "curl/8.7.1"
-        return super().handle_request(new_request)
+API_HOST = "http://172.16.101.32:9898/internal_api"
+TIMEOUT = 15
 
 
-_http_client = httpx.Client(transport=_StealthTransport(), follow_redirects=True)
+def file_to_base64(file_path):
+    """本地图片转 data:image/...;base64,... 格式"""
+    with open(file_path, "rb") as f:
+        raw = f.read()
+    mime, _ = mimetypes.guess_type(file_path)
+    if not mime:
+        mime = "image/jpeg"
+    b64 = base64.b64encode(raw).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
 
 
-def generate_image(
-    prompt: str,
-    output_path: str = "output.png",
-    model: str = "gpt-image-2",
-    size: str = "auto",
-    quality: str = "auto",
-    output_format: str = "png",
-    output_compression: int = 100,
-    background: str = "auto",
-    n: int = 1,
-) -> list[str]:
+# ============================================================
+#  创建任务
+# ============================================================
+def create_task(prompt, image=None, image_type=None,
+                task_type=1, gen_type=None, model_type=None,
+                priority=None, proportion=None, video_time=None):
     """
-    使用 GPT Image 模型生成图片。
-
     参数:
-        prompt: 图片描述，最长 32000 字符
-        output_path: 输出路径
-        model: gpt-image-2 / gpt-image-1
-        size: 1024x1024 / 1536x1024 / 1024x1536 / auto
-        quality: low / medium / high / auto
-        output_format: png / jpeg / webp
-        output_compression: 压缩级别 0-100（仅 jpeg/webp）
-        background: transparent / opaque / auto
-        n: 生成数量 1-10
-
-    返回:
-        保存的文件路径列表
+        prompt:      提示词（必填）
+        image:       图片列表（可选），如 ["base64_1", "base64_2"]
+        image_type:  图片类型，'url' 或 'base64'（可选）
+        task_type:   任务类型，0=图片, 1=视频（默认 1）
+        gen_type:    生成视频类型，0=帧, 1=素材（可选）
+        model_type:  生成视频模型，0=lite, 1=fast（可选）
+        priority:    优先级，正整数（可选）
+        proportion:  宽高比，0=9:16, 1=16:9（可选，默认 0 即 9:16）
+        video_time:  视频时长，4/6/8 秒（可选，默认 8）
     """
-    client = OpenAI(base_url=BASE_URL, api_key=API_KEY, http_client=_http_client)
+    url = API_HOST.rstrip("/") + "/daas/veo/task/create"
 
-    result = client.images.generate(
-        model=model,
-        prompt=prompt,
-        n=n,
-        size=size,
-        quality=quality,
-        output_format=output_format,
-        output_compression=output_compression,
-        background=background,
+    body = {"prompt": prompt, "type": task_type}
+    if image is not None:
+        body["image"] = image
+    if image_type is not None:
+        body["image_type"] = image_type
+    if gen_type is not None:
+        body["gen_type"] = gen_type
+    if model_type is not None:
+        body["model_type"] = model_type
+    if priority is not None:
+        body["priority"] = priority
+    if proportion is not None:
+        body["proportion"] = proportion
+    if video_time is not None:
+        body["video_time"] = video_time
+
+    resp = requests.post(url, json=body, timeout=TIMEOUT)
+    return resp.json()
+
+
+# ============================================================
+#  查询任务状态
+# ============================================================
+def query_status(task_id):
+    """
+    参数:
+        task_id: 任务 ID（必填）
+    """
+    url = API_HOST.rstrip("/") + "/daas/veo/task/status"
+    resp = requests.get(url, params={"task_id": task_id}, timeout=TIMEOUT)
+    return resp.json()
+
+
+# ============================================================
+#  完整流程：创建 → 轮询 → 获取结果
+# ============================================================
+def main():
+    image1 = file_to_base64(r"D:\2026_SKILL\flow\生成一张赛博朋克的孙悟空_2K_202605091728.jpeg")
+    image2 = file_to_base64(r"D:\2026_SKILL\flow\生成一张赛博朋克的猪八戒_2K_202605091728.jpeg")
+    """
+    参数:
+        prompt:      提示词（必填）
+        image:       图片列表（可选），如 ["base64_1", "base64_2"]
+        image_type:  图片类型，'url' 或 'base64'（可选）
+        task_type:   任务类型，0=图片, 1=视频（默认 1）
+        gen_type:    生成视频类型，0=帧, 1=素材（可选）
+        model_type:  生成视频模型，0=lite, 1=fast（可选）
+        priority:    优先级，正整数（可选）
+        proportion:  宽高比，0=9:16, 1=16:9（可选，默认 0 即 9:16）
+        video_time:  视频时长，4/6/8 秒（可选，默认 8）
+    """
+    result = create_task(
+        prompt="生成一个猫追老鼠的视频",
+        # image=[image1,image2],
+        # image_type="base64",
+        task_type=1,
+        gen_type=0,
+        model_type=0,
+        priority=10,
+        proportion=0,
+        video_time=8,
     )
 
-    saved = []
-    ext = output_format if output_format != "jpeg" else "jpg"
-    stem = Path(output_path).stem
-    out_dir = Path(output_path).parent
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if result.get("code") != 200:
+        print("创建失败:", result)
+        return
 
-    for i, img in enumerate(result.data):
-        path = out_dir / f"{stem}_{i}.{ext}" if n > 1 else out_dir / f"{stem}.{ext}"
-        path.write_bytes(base64.b64decode(img.b64_json))
-        saved.append(str(path))
+    task_id = result["data"]["task_id"]
+    print(f"任务已创建，task_id = {task_id}")
 
-    if result.usage:
-        print(f"Tokens - 总: {result.usage.total_tokens}, "
-              f"输入: {result.usage.input_tokens}, 输出: {result.usage.output_tokens}")
+    for i in range(1, 11):
+        time.sleep(5)
+        status = query_status(task_id)
 
-    return saved
+        if status.get("code") != 200:
+            print(f"查询失败: {status}")
+            continue
 
+        data = status["data"]
+        task_status = data.get("task_status", "")
 
-def edit_image(
-    prompt: str,
-    image_paths: list[str],
-    output_path: str = "edited.png",
-    model: str = "gpt-image-2",
-    quality: str = "auto",
-    output_format: str = "png",
-    mask_path: str | None = None,
-    input_fidelity: str = "low",
-) -> str:
-    """
-    使用参考图片编辑/生成新图片（最多 16 张输入图片）。
-
-    参数:
-        prompt: 编辑描述
-        image_paths: 输入图片路径列表
-        output_path: 输出路径
-        model: 模型名称
-        quality: low / medium / high / auto
-        output_format: png / jpeg / webp
-        mask_path: 可选 mask 路径（用于 inpainting）
-        input_fidelity: high 可更好保留输入图片细节
-
-    返回:
-        保存的文件路径
-    """
-    client =  OpenAI(base_url=BASE_URL, api_key=API_KEY, http_client=_http_client)
-
-    images = [open(p, "rb") for p in image_paths]
-    mask = open(mask_path, "rb") if mask_path else None
-
-    try:
-        kwargs = dict(
-            model=model,
-            image=images,
-            prompt=prompt,
-            quality=quality,
-            output_format=output_format,
-            input_fidelity=input_fidelity,
-        )
-        if mask:
-            kwargs["mask"] = mask
-
-        result = client.images.edit(**kwargs)
-
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(output_path).write_bytes(base64.b64decode(result.data[0].b64_json))
-        return output_path
-    finally:
-        for f in images:
-            f.close()
-        if mask:
-            mask.close()
-
-
-def generate_via_responses_api(
-    prompt: str,
-    output_path: str = "output.png",
-    model: str = "gpt-5.4",
-    image_model_config: dict | None = None,
-) -> str:
-    """
-    通过 Responses API 生成图片（支持多轮对话编辑）。
-
-    参数:
-        prompt: 图片描述
-        output_path: 输出路径
-        model: 主模型（如 gpt-4.1, gpt-5）
-        image_model_config: 图片生成工具配置，如 {"quality": "high", "background": "transparent"}
-
-    返回:
-        保存的文件路径
-    """
-    client =  OpenAI(base_url=BASE_URL, api_key=API_KEY, http_client=_http_client)
-
-    tool = {"type": "image_generation"}
-    if image_model_config:
-        tool.update(image_model_config)
-
-    response = client.responses.create(
-        model=model,
-        input=prompt,
-        tools=[tool],
-    )
-
-    image_data = [
-        output.result
-        for output in response.output
-        if output.type == "image_generation_call"
-    ]
-
-    if not image_data:
-        raise ValueError("未生成图片")
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(output_path).write_bytes(base64.b64decode(image_data[0]))
-    return output_path
+        if task_status == "completed":
+            print(f"任务完成！COS 地址: {data.get('cos_url')}")
+            print(f"COS Key: {data.get('cos_key')}")
+            print(f"文件大小: {data.get('filesize')} KB")
+            print(f"视频时长: {data.get('video_time')} 秒")
+            break
+        elif task_status == "failed":
+            print(f"任务失败，错误信息: {data.get('error_msg')}")
+            break
+        else:
+            print(f"第 {i} 次查询，当前状态: {data.get('msg')} ({task_status})")
 
 
 if __name__ == "__main__":
-    # 方式一：最简调用（参考官方示例）
-    client = OpenAI(base_url=BASE_URL, api_key=API_KEY, http_client=_http_client)
-
-    prompt = """
-    A children's book drawing of a veterinarian using a stethoscope to
-    listen to the heartbeat of a baby otter.
-    """
-
-    result = client.images.generate(
-        model="gpt-image-2",
-        prompt=prompt,
-    )
-
-    image_bytes = base64.b64decode(result.data[0].b64_json)
-    with open("otter.png", "wb") as f:
-        f.write(image_bytes)
-    print("生成完成: otter.png")
-
-    # 方式二：使用封装函数（支持更多参数）
-    # paths = generate_image(
-    #     prompt="一只可爱的海獭宝宝仰面漂浮在平静的蓝色水面上，水彩画风格",
-    #     output_path="output.png",
-    #     model="gpt-image-2",
-    #     quality="high",
-    # )
-    # print(f"生成完成: {paths}")
-
-    # 方式三：Responses API 生成（支持多轮编辑）
-    # path = generate_via_responses_api(
-    #     prompt="画一只灰色虎斑猫抱着一只戴着橙色围巾的水獭",
-    #     output_path="cat_otter.png",
-    #     image_model_config={"quality": "high", "background": "transparent"},
-    # )
-    # print(f"Responses API 生成完成: {path}")
-1 3 5 7 10
+    main()

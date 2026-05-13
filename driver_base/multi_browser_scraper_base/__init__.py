@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import random
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,11 +23,206 @@ from ..browser_worker import BrowserWorker
 from ..failure_category import FailureCategory
 from ..worker_context import WorkerContext
 
+REALISTIC_BROWSER_MAJOR = os.getenv("FLOW_BROWSER_MAJOR", "148")
+REALISTIC_BRAND_TOKEN = os.getenv("FLOW_BROWSER_BRAND_TOKEN", "Not/A)Brand")
+REALISTIC_UA_POOL = os.getenv("FLOW_BROWSER_UA_POOL", "148,147,146,145")
+
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    f"Chrome/{REALISTIC_BROWSER_MAJOR}.0.0.0 Safari/537.36"
 )
+
+UA_POOL = [
+    (major.strip(), "0", "0", "0")
+    for major in REALISTIC_UA_POOL.split(",")
+    if major.strip()
+]
+
+
+def resolve_default_user_agent() -> str:
+    """Pick a default browser UA, preferring an explicit override when provided."""
+    explicit = os.getenv("FLOW_BROWSER_USER_AGENT")
+    if explicit:
+        return explicit
+    ua, _sec_ch_ua, _sec_ch_ua_full = _pick_random_ua()
+    return ua
+
+
+def _infer_chrome_major(user_agent: str) -> str:
+    """从 Chrome UA 中提取主版本，提取失败时回退到当前真实感配置。"""
+    match = re.search(r"Chrome/(\d+)", str(user_agent or ""))
+    return str(match.group(1) if match else REALISTIC_BROWSER_MAJOR)
+
+
+def _build_sec_ch_ua(user_agent: str) -> str:
+    """生成与 UA 主版本一致的 Client Hints，避免 UA/CH 版本不一致。"""
+    major = _infer_chrome_major(user_agent)
+    return f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not:A-Brand";v="99"'
+
+
+def _pick_random_ua() -> tuple[str, str, str]:
+    """从内置 Chrome UA 池随机选择一组 UA 与 Client Hints。"""
+    version = ".".join(random.choice(UA_POOL))
+    major = version.split(".", 1)[0]
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{version} Safari/537.36"
+    )
+    sec_ch_ua = _build_sec_ch_ua(ua)
+    sec_ch_ua_full = _build_sec_ch_ua_full_version_list(ua)
+    return ua, sec_ch_ua, sec_ch_ua_full
+
+
+def _infer_chrome_full_version(user_agent: str) -> str:
+    """Extract the full Chrome version from a UA string."""
+    match = re.search(r"Chrome/(\d+(?:\.\d+){0,3})", str(user_agent or ""))
+    return str(match.group(1) if match else f"{REALISTIC_BROWSER_MAJOR}.0.0.0")
+
+
+def _build_sec_ch_ua(user_agent: str) -> str:
+    """Build a Sec-CH-UA header aligned with the configured UA."""
+    explicit = os.getenv("FLOW_BROWSER_SEC_CH_UA")
+    if explicit:
+        return explicit
+    major = _infer_chrome_major(user_agent)
+    return f'"Chromium";v="{major}", "Google Chrome";v="{major}", "{REALISTIC_BRAND_TOKEN}";v="99"'
+
+
+def _build_sec_ch_ua_full_version_list(user_agent: str) -> str:
+    """Build a Sec-CH-UA-Full-Version-List header aligned with the configured UA."""
+    explicit = os.getenv("FLOW_BROWSER_SEC_CH_UA_FULL_VERSION_LIST")
+    if explicit:
+        return explicit
+    version = _infer_chrome_full_version(user_agent)
+    return (
+        f'"Chromium";v="{version}", "Google Chrome";v="{version}", '
+        f'"{REALISTIC_BRAND_TOKEN}";v="99.0.0.0"'
+    )
+
+
+def _parse_sec_ch_ua(header_value: str) -> list[dict[str, str]]:
+    """Parse a Sec-CH-UA style header into JS brand/version objects."""
+    brands: list[dict[str, str]] = []
+    for match in re.finditer(r'"([^"]+)";v="([^"]+)"', str(header_value or "")):
+        brands.append({"brand": match.group(1), "version": match.group(2)})
+    return brands
+
+
+def realistic_stealth_init_script(user_agent: str = DEFAULT_USER_AGENT) -> str:
+    """返回轻量级真实浏览器指纹补丁脚本。
+
+    参考 any-auto-register 的实践：优先使用真实指纹浏览器/Camoufox；本项目
+    不新增依赖，因此在 Chromium context 层补齐 webdriver、UA-CH、插件、
+    mimeTypes、硬件参数和 MouseEvent screenX/screenY 等常见探测面。
+    """
+    major = _infer_chrome_major(user_agent)
+    full_version = _infer_chrome_full_version(user_agent)
+    brands = _parse_sec_ch_ua(_build_sec_ch_ua(user_agent))
+    full_version_list = _parse_sec_ch_ua(_build_sec_ch_ua_full_version_list(user_agent))
+    if not brands:
+        brands = [
+            {"brand": "Chromium", "version": major},
+            {"brand": "Google Chrome", "version": major},
+            {"brand": REALISTIC_BRAND_TOKEN, "version": "99"},
+        ]
+    if not full_version_list:
+        full_version_list = [
+            {"brand": "Chromium", "version": full_version},
+            {"brand": "Google Chrome", "version": full_version},
+            {"brand": REALISTIC_BRAND_TOKEN, "version": "99.0.0.0"},
+        ]
+    return f"""
+(() => {{
+  const defineGetter = (target, prop, getter) => {{
+    try {{
+      Object.defineProperty(target, prop, {{ get: getter, configurable: true }});
+    }} catch (error) {{}}
+  }};
+  const defineNavigatorGetter = (prop, getter) => {{
+    defineGetter(Navigator.prototype, prop, getter);
+    try {{
+      defineGetter(window.navigator, prop, getter);
+    }} catch (error) {{}}
+  }};
+
+  defineNavigatorGetter("webdriver", () => undefined);
+  defineNavigatorGetter("platform", () => "Win32");
+  defineNavigatorGetter("vendor", () => "Google Inc.");
+  defineNavigatorGetter("hardwareConcurrency", () => 8);
+  defineNavigatorGetter("deviceMemory", () => 8);
+
+  const brands = {json.dumps(brands, ensure_ascii=True)};
+  const fullVersionList = {json.dumps(full_version_list, ensure_ascii=True)};
+  const uaData = {{
+    brands,
+    mobile: false,
+    platform: "Windows",
+    getHighEntropyValues: async (hints) => {{
+      const values = {{
+        brands,
+        mobile: false,
+        platform: "Windows",
+        architecture: "x86",
+        bitness: "64",
+        model: "",
+        platformVersion: "10.0.0",
+        uaFullVersion: "{full_version}",
+        fullVersionList,
+        wow64: false,
+      }};
+      return Object.fromEntries((hints || []).map((hint) => [hint, values[hint]]));
+    }},
+    toJSON: () => ({{ brands, mobile: false, platform: "Windows" }}),
+  }};
+  defineNavigatorGetter("userAgentData", () => uaData);
+
+  const mimeTypes = [
+    {{ type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" }},
+    {{ type: "text/pdf", suffixes: "pdf", description: "Portable Document Format" }},
+  ];
+  const pluginNames = [
+    "PDF Viewer",
+    "Chrome PDF Viewer",
+    "Chromium PDF Viewer",
+    "Microsoft Edge PDF Viewer",
+    "WebKit built-in PDF",
+  ];
+  const plugins = pluginNames.map((name) => {{
+    const plugin = {{
+      name,
+      filename: "internal-pdf-viewer",
+      description: "Portable Document Format",
+      length: mimeTypes.length,
+      item: (i) => mimeTypes[i] || null,
+      namedItem: (type) => mimeTypes.find((mime) => mime.type === type) || null,
+    }};
+    mimeTypes.forEach((mime, index) => {{
+      plugin[index] = mime;
+      plugin[mime.type] = mime;
+      mime.enabledPlugin = plugin;
+    }});
+    return plugin;
+  }});
+  plugins.item = (i) => plugins[i] || null;
+  plugins.namedItem = (name) => plugins.find((plugin) => plugin.name === name) || null;
+  plugins.refresh = () => undefined;
+  Object.defineProperty(plugins, Symbol.toStringTag, {{ value: "PluginArray" }});
+  mimeTypes.item = (i) => mimeTypes[i] || null;
+  mimeTypes.namedItem = (type) => mimeTypes.find((mime) => mime.type === type) || null;
+  Object.defineProperty(mimeTypes, Symbol.toStringTag, {{ value: "MimeTypeArray" }});
+  defineNavigatorGetter("plugins", () => plugins);
+  defineNavigatorGetter("mimeTypes", () => mimeTypes);
+
+  const screenOffsetX = Math.floor(Math.random() * 401) + 800;
+  const screenOffsetY = Math.floor(Math.random() * 201) + 400;
+  for (const eventCtor of [MouseEvent, PointerEvent].filter(Boolean)) {{
+    defineGetter(eventCtor.prototype, "screenX", function() {{ return this.clientX + screenOffsetX; }});
+    defineGetter(eventCtor.prototype, "screenY", function() {{ return this.clientY + screenOffsetY; }});
+  }}
+}})();
+"""
 
 
 def normalize_cookies(
@@ -184,7 +382,7 @@ class MultiBrowserScraperBase:
         headless: bool = True,
         locale: str = "en-US",
         timezone_id: str = "Asia/Shanghai",
-        user_agent: str = DEFAULT_USER_AGENT,
+        user_agent: str | None = None,
         navigation_timeout_ms: int = 10_000,
         task_timeout_ms: int | None = None,
         extra_flags: list[str] | None = None,
@@ -195,6 +393,7 @@ class MultiBrowserScraperBase:
         solve_cloudflare: bool = False,
         block_webrtc: bool = True,
         hide_canvas: bool = True,
+        enable_context_stealth_script: bool | None = None,
         recycle_browser_after_tasks: int | None = 200,
         recycle_browser_after_failures: int | None = 5,
     ) -> None:
@@ -250,7 +449,7 @@ class MultiBrowserScraperBase:
         self.headless = headless
         self.locale = locale
         self.timezone_id = timezone_id
-        self.user_agent = user_agent
+        self.user_agent = user_agent or resolve_default_user_agent()
         self.navigation_timeout_ms = int(navigation_timeout_ms)
         self.task_timeout_ms = self._resolve_task_timeout_ms(task_timeout_ms)
         self.extra_flags = list(extra_flags or [])
@@ -261,6 +460,14 @@ class MultiBrowserScraperBase:
         self.solve_cloudflare = solve_cloudflare
         self.block_webrtc = block_webrtc
         self.hide_canvas = hide_canvas
+        if enable_context_stealth_script is None:
+            enable_context_stealth_script = os.getenv("FLOW_ENABLE_CONTEXT_STEALTH_SCRIPT", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        self.enable_context_stealth_script = bool(enable_context_stealth_script)
 
         self._workers: list[BrowserWorker] = []
         self._pool_condition = asyncio.Condition()
@@ -454,14 +661,15 @@ class MultiBrowserScraperBase:
                 传给 `browser.new_context(...)` 的配置字典。
         """
         del worker
-        proxy_settings = construct_proxy_dict(proxy)
+        proxy_settings = construct_proxy_dict(proxy) if proxy else None
         options: dict[str, Any] = {
             "locale": self.locale,
             "timezone_id": self.timezone_id,
             "user_agent": self.user_agent,
             "extra_http_headers": {
-                "Accept-Language": f"{self.locale},en;q=0.9",
-                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "Accept-Language": f"{self.locale},{self.locale.split('-', 1)[0]};q=0.9,en;q=0.8",
+                "Sec-Ch-Ua": _build_sec_ch_ua(self.user_agent),
+                "Sec-Ch-Ua-Full-Version-List": _build_sec_ch_ua_full_version_list(self.user_agent),
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"Windows"',
                 "Upgrade-Insecure-Requests": "1",
@@ -504,6 +712,8 @@ class MultiBrowserScraperBase:
                 处理后的浏览器上下文。
         """
         del task_data, worker
+        if self.enable_context_stealth_script:
+            await context.add_init_script(realistic_stealth_init_script(self.user_agent))
         return context
 
     async def initialize_page(
