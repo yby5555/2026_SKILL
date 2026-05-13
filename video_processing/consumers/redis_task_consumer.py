@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import os
 import random
 import re
 import time
@@ -54,6 +55,40 @@ CONSUMER_WORKERS = BROWSER_POOL_SIZE * CONTEXTS_PER_BROWSER  # 消费者工作�
 COOLDOWN_MIN_SEC = 5  # 任务间冷却最小秒数
 COOLDOWN_MAX_SEC = 10  # 任务间冷却最大秒数
 
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a bool-like environment variable without adding runtime dependencies."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _parse_viewport_env(raw_value: str | None) -> dict[str, int] | None:
+    """Parse WIDTHxHEIGHT viewport strings, returning None for invalid/disabled input."""
+    if not raw_value:
+        return None
+    raw_value = raw_value.strip().lower()
+    if raw_value in {"0", "none", "auto", "native"}:
+        return None
+    match = re.fullmatch(r"(\d{3,5})x(\d{3,5})", raw_value)
+    if not match:
+        raise ValueError(f"Invalid viewport value {raw_value!r}; expected WIDTHxHEIGHT")
+    return {"width": int(match.group(1)), "height": int(match.group(2))}
+
+
+def _resolve_consumer_extra_flags(headless: bool) -> list[str]:
+    """Build browser launch flags while keeping headed audit runs close to the user's browser."""
+    flags = ["--start-maximized"]
+    configured = os.getenv("FLOW_CONSUMER_EXTRA_FLAGS", "").strip()
+    if configured:
+        flags.extend(part.strip() for part in configured.split(",") if part.strip())
+    if headless and not any(flag.startswith("--headless") for flag in flags):
+        flags.append("--headless=new")
+    if not headless:
+        flags = [flag for flag in flags if not flag.startswith("--headless")]
+    return flags
 
 def _extract_json_objects(raw: str) -> list[dict]:
     """
@@ -554,13 +589,16 @@ async def consume_forever() -> None:
     task_collection = create_task_collection()
     _recover_processing_queue(redis_client)
 
+    headless = _env_bool("FLOW_CONSUMER_HEADLESS", True)
+    viewport = _parse_viewport_env(os.getenv("FLOW_CONSUMER_VIEWPORT") or os.getenv("FLOW_BROWSER_VIEWPORT"))
     scraper = GoogleFlowVideoScraperV2(
         browser_pool_size=BROWSER_POOL_SIZE,
         max_contexts_per_browser=CONTEXTS_PER_BROWSER,
-        headless=True,
+        headless=headless,
         locale=resolve_flow_locale(),
         timezone_id=resolve_flow_timezone_id(),
-        extra_flags=["--start-maximized", "--headless=new"],
+        extra_flags=_resolve_consumer_extra_flags(headless),
+        viewport=viewport,
         task_timeout_ms=4 * 60 * 1000,
     )
 

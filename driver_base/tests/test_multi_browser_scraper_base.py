@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import unittest
-from unittest.mock import patch
 
 from driver_base import FailureCategory, MultiBrowserScraperBase
 
@@ -155,19 +154,6 @@ class MultiBrowserScraperBaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Chrome/145", options["user_agent"])
         self.assertIn('v="145"', options["extra_http_headers"]["Sec-Ch-Ua"])
         self.assertEqual(options["extra_http_headers"]["Sec-Ch-Ua-Platform"], '"Windows"')
-
-    def test_default_user_agent_uses_random_pool_when_not_explicitly_provided(self):
-        with patch(
-            "driver_base.multi_browser_scraper_base.random.choice",
-            return_value=("147", "0", "0", "0"),
-        ):
-            scraper = ClassificationScraper()
-
-        options = scraper.build_context_options(DummyWorker(), None)
-
-        self.assertIn("Chrome/147.0.0.0", scraper.user_agent)
-        self.assertIn("Chrome/147.0.0.0", options["user_agent"])
-        self.assertIn('v="147"', options["extra_http_headers"]["Sec-Ch-Ua"])
 
     async def test_classify_failure_maps_core_categories(self):
         """验证失败分类逻辑能覆盖核心异常场景。

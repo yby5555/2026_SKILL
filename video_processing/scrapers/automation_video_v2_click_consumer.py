@@ -997,6 +997,13 @@ async def _wait_for_prompt_attachment(
     )
 
 
+
+async def pause_before_file_selection(worker_id: Any, min_sec: float = 4.0, max_sec: float = 5.0) -> None:
+    """Pause after the upload click/file chooser opens to mimic a human finding an image."""
+    logger.info(f"{_lp(worker_id)} file chooser opened; pausing {min_sec:.0f}-{max_sec:.0f}s to mimic human image selection")
+    await human_delay(min_sec, max_sec)
+
+
 async def upload_reference_image_via_picker(
     page,
     worker_id: Any,
@@ -1029,6 +1036,7 @@ async def upload_reference_image_via_picker(
         logger.info(f"{_lp(worker_id)} 上传图片时未触发或未完成法律声明处理: {exc}")
 
     file_chooser = await fc_info.value
+    await pause_before_file_selection(worker_id)
     async with page.expect_response(
         lambda r: "uploadImage" in r.url and r.request.method == "POST",
         timeout=90000,
@@ -1113,6 +1121,7 @@ async def upload_frame_image_via_picker(
         await human_click(page, upload_option)
 
     file_chooser = await fc_info.value
+    await pause_before_file_selection(worker_id)
     async with page.expect_response(
         lambda r: "uploadImage" in r.url and r.request.method == "POST",
         timeout=90000,

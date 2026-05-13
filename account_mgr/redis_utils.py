@@ -6,6 +6,7 @@ Redis 工具函数 - 包含两套接口：
 """
 
 import json
+import os
 
 try:
     import redis.asyncio as aioredis
@@ -119,7 +120,29 @@ return 1
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def get_next_cookie(max_attempts: int | None = None) -> tuple[str, list] | None:
+def _resolve_max_concurrent_per_account(override: int | str | None = None) -> int:
+    """
+    Resolve the per-account browser concurrency limit.
+
+    Flow video generation is sensitive to multiple simultaneous browser sessions
+    sharing one Google account.  Keep the historical config value as a fallback,
+    but allow the video consumer to force a safer single-slot policy through the
+    environment without editing the local, often untracked, config.py.
+    """
+    raw = override
+    if raw is None:
+        raw = os.getenv("FLOW_MAX_CONCURRENT_PER_ACCOUNT", MAX_CONCURRENT_PER_ACCOUNT)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return max(1, int(MAX_CONCURRENT_PER_ACCOUNT))
+
+
+def get_next_cookie(
+    max_attempts: int | None = None,
+    *,
+    max_concurrent_per_account: int | str | None = None,
+) -> tuple[str, list] | None:
     """
     Round-Robin 取下一个可用 Cookie，同时用 Lua 脚本原子检查并发槽位。
 
@@ -142,6 +165,7 @@ def get_next_cookie(max_attempts: int | None = None) -> tuple[str, list] | None:
         return None
 
     script = r.register_script(_LUA_TRY_ACQUIRE)
+    concurrency_limit = _resolve_max_concurrent_per_account(max_concurrent_per_account)
 
     for _ in range(max_attempts or pool_size):
         try:
@@ -164,7 +188,7 @@ def get_next_cookie(max_attempts: int | None = None) -> tuple[str, list] | None:
         inuse_key = REDIS_INUSE_KEY.format(email=email)
         acquired = script(
             keys=[inuse_key],
-            args=[MAX_CONCURRENT_PER_ACCOUNT],
+            args=[concurrency_limit],
         )
         if not acquired:
             # 该账号槽位已满，继续尝试下一个

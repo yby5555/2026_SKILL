@@ -159,18 +159,7 @@ class BrowserWorker:
                 """
                 context_options = session_self._context_options.copy()
                 requested_options = self._context_options_factory(self, proxy)
-                force_context_fingerprint = os.getenv("FLOW_FORCE_CONTEXT_FINGERPRINT", "").lower() in {
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                }
-                requested_fingerprint_differs = any(
-                    requested_options.get(key) != context_options.get(key)
-                    for key in ("user_agent", "extra_http_headers")
-                    if key in requested_options
-                )
-                if force_context_fingerprint or requested_fingerprint_differs:
+                if os.getenv("FLOW_FORCE_CONTEXT_FINGERPRINT", "").lower() in {"1", "true", "yes", "on"}:
                     context_options.update(requested_options)
                 else:
                     for key in ("locale", "timezone_id", "viewport", "screen", "ignore_https_errors"):

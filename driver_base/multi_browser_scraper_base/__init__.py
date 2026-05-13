@@ -23,9 +23,7 @@ from ..browser_worker import BrowserWorker
 from ..failure_category import FailureCategory
 from ..worker_context import WorkerContext
 
-REALISTIC_BROWSER_MAJOR = os.getenv("FLOW_BROWSER_MAJOR", "148")
-REALISTIC_BRAND_TOKEN = os.getenv("FLOW_BROWSER_BRAND_TOKEN", "Not/A)Brand")
-REALISTIC_UA_POOL = os.getenv("FLOW_BROWSER_UA_POOL", "148,147,146,145")
+REALISTIC_BROWSER_MAJOR = os.getenv("FLOW_BROWSER_MAJOR", "145")
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -34,19 +32,11 @@ DEFAULT_USER_AGENT = (
 )
 
 UA_POOL = [
-    (major.strip(), "0", "0", "0")
-    for major in REALISTIC_UA_POOL.split(",")
-    if major.strip()
+    ("145", "0", "0", "0"),
+    ("144", "0", "0", "0"),
+    ("143", "0", "0", "0"),
+    ("142", "0", "0", "0"),
 ]
-
-
-def resolve_default_user_agent() -> str:
-    """Pick a default browser UA, preferring an explicit override when provided."""
-    explicit = os.getenv("FLOW_BROWSER_USER_AGENT")
-    if explicit:
-        return explicit
-    ua, _sec_ch_ua, _sec_ch_ua_full = _pick_random_ua()
-    return ua
 
 
 def _infer_chrome_major(user_agent: str) -> str:
@@ -70,44 +60,12 @@ def _pick_random_ua() -> tuple[str, str, str]:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         f"Chrome/{version} Safari/537.36"
     )
-    sec_ch_ua = _build_sec_ch_ua(ua)
-    sec_ch_ua_full = _build_sec_ch_ua_full_version_list(ua)
-    return ua, sec_ch_ua, sec_ch_ua_full
-
-
-def _infer_chrome_full_version(user_agent: str) -> str:
-    """Extract the full Chrome version from a UA string."""
-    match = re.search(r"Chrome/(\d+(?:\.\d+){0,3})", str(user_agent or ""))
-    return str(match.group(1) if match else f"{REALISTIC_BROWSER_MAJOR}.0.0.0")
-
-
-def _build_sec_ch_ua(user_agent: str) -> str:
-    """Build a Sec-CH-UA header aligned with the configured UA."""
-    explicit = os.getenv("FLOW_BROWSER_SEC_CH_UA")
-    if explicit:
-        return explicit
-    major = _infer_chrome_major(user_agent)
-    return f'"Chromium";v="{major}", "Google Chrome";v="{major}", "{REALISTIC_BRAND_TOKEN}";v="99"'
-
-
-def _build_sec_ch_ua_full_version_list(user_agent: str) -> str:
-    """Build a Sec-CH-UA-Full-Version-List header aligned with the configured UA."""
-    explicit = os.getenv("FLOW_BROWSER_SEC_CH_UA_FULL_VERSION_LIST")
-    if explicit:
-        return explicit
-    version = _infer_chrome_full_version(user_agent)
-    return (
+    sec_ch_ua = f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not:A-Brand";v="99"'
+    sec_ch_ua_full = (
         f'"Chromium";v="{version}", "Google Chrome";v="{version}", '
-        f'"{REALISTIC_BRAND_TOKEN}";v="99.0.0.0"'
+        '"Not:A-Brand";v="99.0.0.0"'
     )
-
-
-def _parse_sec_ch_ua(header_value: str) -> list[dict[str, str]]:
-    """Parse a Sec-CH-UA style header into JS brand/version objects."""
-    brands: list[dict[str, str]] = []
-    for match in re.finditer(r'"([^"]+)";v="([^"]+)"', str(header_value or "")):
-        brands.append({"brand": match.group(1), "version": match.group(2)})
-    return brands
+    return ua, sec_ch_ua, sec_ch_ua_full
 
 
 def realistic_stealth_init_script(user_agent: str = DEFAULT_USER_AGENT) -> str:
@@ -118,21 +76,6 @@ def realistic_stealth_init_script(user_agent: str = DEFAULT_USER_AGENT) -> str:
     mimeTypes、硬件参数和 MouseEvent screenX/screenY 等常见探测面。
     """
     major = _infer_chrome_major(user_agent)
-    full_version = _infer_chrome_full_version(user_agent)
-    brands = _parse_sec_ch_ua(_build_sec_ch_ua(user_agent))
-    full_version_list = _parse_sec_ch_ua(_build_sec_ch_ua_full_version_list(user_agent))
-    if not brands:
-        brands = [
-            {"brand": "Chromium", "version": major},
-            {"brand": "Google Chrome", "version": major},
-            {"brand": REALISTIC_BRAND_TOKEN, "version": "99"},
-        ]
-    if not full_version_list:
-        full_version_list = [
-            {"brand": "Chromium", "version": full_version},
-            {"brand": "Google Chrome", "version": full_version},
-            {"brand": REALISTIC_BRAND_TOKEN, "version": "99.0.0.0"},
-        ]
     return f"""
 (() => {{
   const defineGetter = (target, prop, getter) => {{
@@ -140,21 +83,18 @@ def realistic_stealth_init_script(user_agent: str = DEFAULT_USER_AGENT) -> str:
       Object.defineProperty(target, prop, {{ get: getter, configurable: true }});
     }} catch (error) {{}}
   }};
-  const defineNavigatorGetter = (prop, getter) => {{
-    defineGetter(Navigator.prototype, prop, getter);
-    try {{
-      defineGetter(window.navigator, prop, getter);
-    }} catch (error) {{}}
-  }};
 
-  defineNavigatorGetter("webdriver", () => undefined);
-  defineNavigatorGetter("platform", () => "Win32");
-  defineNavigatorGetter("vendor", () => "Google Inc.");
-  defineNavigatorGetter("hardwareConcurrency", () => 8);
-  defineNavigatorGetter("deviceMemory", () => 8);
+  defineGetter(Navigator.prototype, "webdriver", () => undefined);
+  defineGetter(Navigator.prototype, "platform", () => "Win32");
+  defineGetter(Navigator.prototype, "vendor", () => "Google Inc.");
+  defineGetter(Navigator.prototype, "hardwareConcurrency", () => 8);
+  defineGetter(Navigator.prototype, "deviceMemory", () => 8);
 
-  const brands = {json.dumps(brands, ensure_ascii=True)};
-  const fullVersionList = {json.dumps(full_version_list, ensure_ascii=True)};
+  const brands = [
+    {{ brand: "Chromium", version: "{major}" }},
+    {{ brand: "Google Chrome", version: "{major}" }},
+    {{ brand: "Not:A-Brand", version: "99" }},
+  ];
   const uaData = {{
     brands,
     mobile: false,
@@ -168,15 +108,15 @@ def realistic_stealth_init_script(user_agent: str = DEFAULT_USER_AGENT) -> str:
         bitness: "64",
         model: "",
         platformVersion: "10.0.0",
-        uaFullVersion: "{full_version}",
-        fullVersionList,
+        uaFullVersion: "{major}.0.0.0",
+        fullVersionList: brands,
         wow64: false,
       }};
       return Object.fromEntries((hints || []).map((hint) => [hint, values[hint]]));
     }},
     toJSON: () => ({{ brands, mobile: false, platform: "Windows" }}),
   }};
-  defineNavigatorGetter("userAgentData", () => uaData);
+  defineGetter(Navigator.prototype, "userAgentData", () => uaData);
 
   const mimeTypes = [
     {{ type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" }},
@@ -212,8 +152,8 @@ def realistic_stealth_init_script(user_agent: str = DEFAULT_USER_AGENT) -> str:
   mimeTypes.item = (i) => mimeTypes[i] || null;
   mimeTypes.namedItem = (type) => mimeTypes.find((mime) => mime.type === type) || null;
   Object.defineProperty(mimeTypes, Symbol.toStringTag, {{ value: "MimeTypeArray" }});
-  defineNavigatorGetter("plugins", () => plugins);
-  defineNavigatorGetter("mimeTypes", () => mimeTypes);
+  defineGetter(Navigator.prototype, "plugins", () => plugins);
+  defineGetter(Navigator.prototype, "mimeTypes", () => mimeTypes);
 
   const screenOffsetX = Math.floor(Math.random() * 401) + 800;
   const screenOffsetY = Math.floor(Math.random() * 201) + 400;
@@ -382,7 +322,7 @@ class MultiBrowserScraperBase:
         headless: bool = True,
         locale: str = "en-US",
         timezone_id: str = "Asia/Shanghai",
-        user_agent: str | None = None,
+        user_agent: str = DEFAULT_USER_AGENT,
         navigation_timeout_ms: int = 10_000,
         task_timeout_ms: int | None = None,
         extra_flags: list[str] | None = None,
@@ -449,7 +389,7 @@ class MultiBrowserScraperBase:
         self.headless = headless
         self.locale = locale
         self.timezone_id = timezone_id
-        self.user_agent = user_agent or resolve_default_user_agent()
+        self.user_agent = user_agent
         self.navigation_timeout_ms = int(navigation_timeout_ms)
         self.task_timeout_ms = self._resolve_task_timeout_ms(task_timeout_ms)
         self.extra_flags = list(extra_flags or [])
@@ -669,7 +609,6 @@ class MultiBrowserScraperBase:
             "extra_http_headers": {
                 "Accept-Language": f"{self.locale},{self.locale.split('-', 1)[0]};q=0.9,en;q=0.8",
                 "Sec-Ch-Ua": _build_sec_ch_ua(self.user_agent),
-                "Sec-Ch-Ua-Full-Version-List": _build_sec_ch_ua_full_version_list(self.user_agent),
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"Windows"',
                 "Upgrade-Insecure-Requests": "1",

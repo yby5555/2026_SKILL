@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -57,6 +58,8 @@ _LOG_PROCESSING_DIR = Path(__file__).resolve().parent.parent  # video_processing
 LOG_DIR = _LOG_PROCESSING_DIR / "log"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "task_pipeline.log"
+REDIS_SOCKET_TIMEOUT_SECONDS = int(os.getenv("FLOW_REDIS_SOCKET_TIMEOUT_SECONDS", "60"))
+REDIS_CONNECT_TIMEOUT_SECONDS = int(os.getenv("FLOW_REDIS_CONNECT_TIMEOUT_SECONDS", "15"))
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -127,8 +130,8 @@ def create_redis_client() -> Redis:
         db=REDIS_DB,
         password=REDIS_PASSWORD,
         decode_responses=True,
-        socket_timeout=10,
-        socket_connect_timeout=10,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+        socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
     )
     client.ping()
     return client
@@ -327,7 +330,15 @@ def build_scraper_task(task: dict[str, Any]) -> dict[str, Any]:
     for passthrough_key in ("gen_type", "proportion", "model_type"):
         if passthrough_key in task:
             payload[passthrough_key] = task[passthrough_key]
-    if "image_value" in task:
+    direct_image_keys = ("image_base64_list", "image_base64", "image_url_list", "image_url")
+    direct_image_payload = {
+        key: task[key]
+        for key in direct_image_keys
+        if key in task and task[key] not in (None, "", [])
+    }
+    if direct_image_payload:
+        payload.update(direct_image_payload)
+    elif "image_value" in task:
         payload.update(normalize_image_payload(task.get("image_value"), str(task.get("image_type", "") or "")))
     else:
         payload.update(normalize_image_payload(task.get("image")))

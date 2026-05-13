@@ -1,14 +1,2 @@
-RuntimeError: 生成失败: {"remainingCredits": 23310, "media": [{"name": "c3d1821f-1864-485d-8fb8-8472e5015be6", "projectId": "2e12fe0f-4ab4-4162-900e-b2012c532489", "workflowId": "98e2670e-5595-402a-a260-ca9fc9bab1f3", "workflowStepId": "CAE", "mediaMetadata": {"createTime": "2026-05-10T13:23:09.963865Z", "mediaTitle": "The first picture is the character image I provided, the second one is the code. Help me generate this character drinking and coding.", "requestData": {"videoGenerationRequestData": {"videoModelControlInput": {"videoModelName": "veo_3_1_r2v_lite", "videoGenerationMode": "VIDEO_GENERATION_MODE_REFERENCE_TO_VIDEO", "videoModelCapabilities": ["VIDEO_MODEL_CAPABILITY_MULTI_REFERENCE"], "videoAspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT"}, "videoGenerationImageInputs": [{"mediaGenerationId": "c6ba85ba-3520-4e4e-a3c2-54d86c11b4d4", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET_IMAGE", "mediaId": "c6ba85ba-3520-4e4e-a3c2-54d86c11b4d4"}]}, "promptInputs": [{"structuredPrompt": {"parts": [{"text": "第一张是我传入的人物图片，第二张是代码，帮我生成这个人物边喝酒边打代码"}]}}], "clientPlatform": "CLIENT_PLATFORM_WEB"}, "mediaStatus": {"mediaGenerationStatus": "MEDIA_GENERATION_STATUS_FAILED", "error": {"code": 3, "message": "PUBLIC_ERROR_IP_INPUT_IMAGE"}, "failureReasons": ["IP_PROHIBITED"]}, "visibility": "FILTERED"}, "video": {"generatedVideo": {"seed": 12345, "prompt": "The first picture is the character image I provided, the second one is the code. Help me generate this character drinking and coding.", "model": "veo_3_1_r2v_lite", "baseImageMediaGenerationId": "", "isLooped": false, "aspectRatio": "VIDEO_ASPECT_RATIO_PORTRAIT"}, "dimensions": {}, "operation": {"name": "c3d1821f-1864-485d-8fb8-8472e5015be6"}}}]}
-RuntimeError: {
-  "error": {
-    "code": 403,
-    "message": "reCAPTCHA evaluation failed",
-    "status": "PERMISSION_DENIED",
-    "details": [
-      {
-        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
-        "reason": "PUBLIC_ERROR_UNUSUAL_ACTIVITY"
-      }
-    ]
-  }
-}
+1.第一个问题为什么2026-05-13 19:47:36 [INFO] [B0:C1][任务:audit40-20260513-181915-frame_single-g0-i1-m0-p1-v2] browser_identity={"configuredUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36", "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36", "platform": "Win32", "language": "en-US", "languages": ["en-US"], "userAgentData": {"brands": [{"brand": "Chromium", "version": "145"}, {"brand": "Not:A-Brand", "version": "99"}], "mobile": false, "platform": "Windows", "highEntropy": {"architecture": "x86", "bitness": "64", "brands": [{"brand": "Chromium", "version": "145"}, {"brand": "Not:A-Brand", "version": "99"}], "fullVersionList": [{"brand": "Chromium", "version": "145.0.7632.6"}, {"brand": "Not:A-Brand", "version": "99.0.0.0"}], "mobile": false, "model": "", "platform": "Windows", "platformVersion": "10.0", "uaFullVersion": "145.0.7632.6"}}}这些都是一样的
+2.排查一下2026-05-13 19:58:06 [INFO] [B1:C1][任务:audit40-20260513-181915-frame_double-g0-i2-m0-p0-v1] 生成提交响应未返回 media，payload={"error": {"code": 403, "message": "reCAPTCHA evaluation failed", "status": "PERMISSION_DENIED", "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "PUBLIC_ERROR_UNUSUAL_ACTIVITY"}]}}这种报错，
