@@ -43,13 +43,89 @@ CLOAKBROWSER_REPO = Path(os.getenv("CLOAKBROWSER_REPO", r"D:\CloakBrowser"))
 if CLOAKBROWSER_REPO.exists() and str(CLOAKBROWSER_REPO) not in sys.path:
     sys.path.insert(0, str(CLOAKBROWSER_REPO))
 
-from cloak_browser_runner import CloakBrowserRunner, CloakBrowserRunnerConfig, get_cloakbrowser_status  # noqa: E402
+from cloak_browser_runner import (  # noqa: E402
+    CloakBrowserRunner,
+    CloakBrowserRunnerConfig,
+    get_cloakbrowser_status,
+    profile_dir_for_identity,
+    stable_fingerprint_seed,
+)
 from driver_base.multi_browser_scraper_base import load_cookies  # noqa: E402
 from video_processing.scrapers.automation_video_v2_click_consumer import GoogleFlowVideoScraperV2  # noqa: E402
 from video_processing.utils.task_common import build_scraper_task, now_local  # noqa: E402
 
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts" / "video_task"
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+PROFILE_BASE_DIR = Path(os.getenv("CLOAK_VIDEO_PROFILE_BASE_DIR", str(Path(__file__).resolve().parent / "profiles")))
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def env_optional(name: str) -> str | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    return value or None
+
+
+def env_int_optional(name: str) -> int | None:
+    raw = env_optional(name)
+    if raw is None:
+        return None
+    return int(raw)
+
+
+def env_extra_args(name: str = "CLOAK_VIDEO_EXTRA_ARGS") -> tuple[str, ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def resolve_identity(task: dict[str, Any]) -> str:
+    for key in ("email", "account", "account_email", "cookie_key", "_id"):
+        value = str(task.get(key) or "").strip()
+        if value:
+            return value
+    return "cloak-flow-default"
+
+
+def build_runner_config(task: dict[str, Any], *, suffix: str = "") -> CloakBrowserRunnerConfig:
+    identity = resolve_identity(task)
+    seed = env_int_optional("CLOAK_VIDEO_FINGERPRINT_SEED")
+    if seed is None and env_bool("CLOAK_VIDEO_STABLE_FINGERPRINT", True):
+        seed = stable_fingerprint_seed(identity)
+
+    persistent_enabled = env_bool("CLOAK_VIDEO_PERSISTENT_PROFILE", True)
+    profile_dir = env_optional("CLOAK_VIDEO_PROFILE_DIR")
+    if persistent_enabled and not profile_dir:
+        profile_dir = str(profile_dir_for_identity(PROFILE_BASE_DIR, identity, suffix=suffix))
+
+    return CloakBrowserRunnerConfig(
+        headless=env_bool("CLOAK_VIDEO_HEADLESS", False),
+        humanize=env_bool("CLOAK_VIDEO_HUMANIZE", True),
+        human_preset=os.getenv("CLOAK_VIDEO_HUMAN_PRESET", "careful").strip() or "careful",
+        stealth_args=env_bool("CLOAK_VIDEO_STEALTH_ARGS", True),
+        default_proxy=env_optional("CLOAK_VIDEO_PROXY"),
+        geoip=env_bool("CLOAK_VIDEO_GEOIP", False),
+        backend=env_optional("CLOAK_VIDEO_BACKEND"),
+        timezone=env_optional("CLOAK_VIDEO_TIMEZONE"),
+        locale=env_optional("CLOAK_VIDEO_LOCALE"),
+        fingerprint_seed=seed,
+        extra_args=env_extra_args(),
+        persistent_profile_dir=profile_dir,
+        use_persistent_context=persistent_enabled,
+        inject_cookies_into_persistent_profile=env_bool("CLOAK_VIDEO_INJECT_COOKIES", True),
+    )
+
 
 
 COOKIE_DROP_EXACT_NAMES = {
@@ -166,10 +242,7 @@ async def run_one_task() -> dict[str, Any]:
     worker = ProbeWorkerContext()
     artifact_prefix = ARTIFACT_DIR / f"failure_{int(time.time())}"
 
-    runner_config = CloakBrowserRunnerConfig(
-        headless=False,
-        humanize=True
-    )
+    runner_config = build_runner_config(normalized_task)
 
     started_at = now_local().isoformat()
     async with CloakBrowserRunner(runner_config) as runner:
@@ -219,6 +292,21 @@ async def run_one_task() -> dict[str, Any]:
         "cookie_count": len(normalized_task.get("cookies") or []),
         "cookie_dropped_count": len(dropped_cookies),
         "cookie_dropped_redacted": dropped_cookies,
+        "runner_config_redacted": {
+            "headless": runner_config.headless,
+            "humanize": runner_config.humanize,
+            "human_preset": runner_config.human_preset,
+            "geoip": runner_config.geoip,
+            "backend": runner_config.backend,
+            "timezone": runner_config.timezone,
+            "locale": runner_config.locale,
+            "fingerprint_seed": runner_config.fingerprint_seed,
+            "persistent_profile_dir": str(runner_config.persistent_profile_dir or ""),
+            "use_persistent_context": runner_config.use_persistent_context,
+            "inject_cookies_into_persistent_profile": runner_config.inject_cookies_into_persistent_profile,
+            "extra_args": list(runner_config.extra_args),
+            "proxy_configured": bool(runner_config.default_proxy),
+        },
         "cloakbrowser": get_cloakbrowser_status(),
         "execution": execution,
     }

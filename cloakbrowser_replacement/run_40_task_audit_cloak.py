@@ -38,7 +38,7 @@ from video_processing.consumers.run_40_task_audit import (  # noqa: E402
 )
 from video_processing.scrapers.automation_video_v2_click_consumer import GoogleFlowVideoScraperV2  # noqa: E402
 from video_processing.utils.task_common import build_scraper_task, now_local  # noqa: E402
-from run_one_video_task_headless import ProbeWorkerContext, filter_flow_cookies, validate_video_task  # noqa: E402
+from run_one_video_task_headless import ProbeWorkerContext, build_runner_config, filter_flow_cookies, validate_video_task  # noqa: E402
 
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts" / "audit40_cloak"
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,13 +48,15 @@ ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 # Edit these values directly if you want different local behavior.
 DEFAULT_HEADLESS = True
 DEFAULT_IMAGE_ONLY = True
-DEFAULT_BROWSER_POOL_SIZE = 2
-DEFAULT_CONTEXTS_PER_BROWSER = 1
-DEFAULT_COOLDOWN_SECONDS = 5.0
+DEFAULT_BROWSER_POOL_SIZE = 1
+DEFAULT_CONTEXTS_PER_BROWSER = 2
+DEFAULT_COOLDOWN_SECONDS = 8.0
 DEFAULT_LIMIT = 0  # 0 means all selected tasks; with DEFAULT_IMAGE_ONLY=True this is 32 tasks.
 DEFAULT_POLL_TIMEOUT_MS = 6 * 60 * 1000
 DEFAULT_TASK_TIMEOUT_MS = 9 * 60 * 1000
 DEFAULT_HUMANIZE = True
+DEFAULT_HUMAN_PRESET = "careful"
+DEFAULT_STAGGER_SECONDS = 8.0
 
 
 def image_file_to_data_uri(path: Path) -> str:
@@ -87,6 +89,24 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             family: {**bucket, "success_rate": bucket["success"] / bucket["total"] if bucket["total"] else 0.0}
             for family, bucket in by_family.items()
         },
+    }
+
+
+def runner_config_report(config: CloakBrowserRunnerConfig) -> dict[str, Any]:
+    return {
+        "headless": config.headless,
+        "humanize": config.humanize,
+        "human_preset": config.human_preset,
+        "geoip": config.geoip,
+        "backend": config.backend,
+        "timezone": config.timezone,
+        "locale": config.locale,
+        "fingerprint_seed": config.fingerprint_seed,
+        "persistent_profile_dir": str(config.persistent_profile_dir or ""),
+        "use_persistent_context": config.use_persistent_context,
+        "inject_cookies_into_persistent_profile": config.inject_cookies_into_persistent_profile,
+        "extra_args": list(config.extra_args),
+        "proxy_configured": bool(config.default_proxy),
     }
 
 
@@ -192,7 +212,14 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         task_timeout_ms=args.task_timeout_ms,
         recycle_browser_after_failures=1,
     )
-    runner_config = CloakBrowserRunnerConfig(headless=args.headless, humanize=not args.no_humanize)
+    base_runner_config = build_runner_config(
+        {"_id": run_id, "email": "audit40"},
+        suffix="base",
+    )
+    base_runner_config.headless = args.headless
+    base_runner_config.humanize = not args.no_humanize
+    base_runner_config.human_preset = args.human_preset
+
 
     results: list[dict[str, Any]] = []
     result_lock = asyncio.Lock()
@@ -215,6 +242,7 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "limit": args.limit,
             "image_only": args.image_only,
             "cloakbrowser": get_cloakbrowser_status(),
+            "runner_config_redacted": runner_config_report(base_runner_config),
             **summarize(results),
             "manifest_path": str(manifest_path),
             "tasks": results,
@@ -225,7 +253,16 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     async def worker_loop(worker_id: int, context_id: int) -> None:
-        async with CloakBrowserRunner(runner_config) as runner:
+        if args.stagger_seconds > 0:
+            await asyncio.sleep((worker_id - 1 + context_id) * args.stagger_seconds)
+        worker_config = build_runner_config(
+            {"_id": run_id, "email": "audit40"},
+            suffix=f"b{worker_id}-c{context_id}",
+        )
+        worker_config.headless = args.headless
+        worker_config.humanize = not args.no_humanize
+        worker_config.human_preset = args.human_preset
+        async with CloakBrowserRunner(worker_config) as runner:
             while True:
                 item = await queue.get()
                 if item is None:
@@ -273,6 +310,7 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "limit": args.limit,
         "image_only": args.image_only,
         "cloakbrowser": get_cloakbrowser_status(),
+        "runner_config_redacted": runner_config_report(base_runner_config),
         **summarize(results),
         "manifest_path": str(manifest_path),
         "tasks": results,
@@ -293,9 +331,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", default="")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=DEFAULT_HEADLESS)
     parser.add_argument("--no-humanize", action="store_true", default=not DEFAULT_HUMANIZE)
+    parser.add_argument("--human-preset", default=DEFAULT_HUMAN_PRESET, choices=["default", "careful"])
     parser.add_argument("--poll-timeout-ms", type=int, default=DEFAULT_POLL_TIMEOUT_MS)
     parser.add_argument("--task-timeout-ms", type=int, default=DEFAULT_TASK_TIMEOUT_MS)
     parser.add_argument("--cooldown-seconds", type=float, default=DEFAULT_COOLDOWN_SECONDS)
+    parser.add_argument("--stagger-seconds", type=float, default=DEFAULT_STAGGER_SECONDS)
     parser.add_argument("--browser-pool-size", type=int, default=DEFAULT_BROWSER_POOL_SIZE)
     parser.add_argument("--contexts-per-browser", type=int, default=DEFAULT_CONTEXTS_PER_BROWSER)
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="For smoke testing; 0 means all selected tasks")

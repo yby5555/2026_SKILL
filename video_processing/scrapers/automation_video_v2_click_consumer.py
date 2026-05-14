@@ -117,8 +117,64 @@ def _lp(worker_id: Any = "", context_id: Any = "") -> str:
 
 
 async def human_delay(min_sec: float = 0.5, max_sec: float = 2.0) -> None:
-    """模拟人类操作间的随机延迟，等待 min_sec 到 max_sec 秒。"""
+    """Sleep for a random interval between min_sec and max_sec."""
     await asyncio.sleep(random.uniform(min_sec, max_sec))
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.info(f"Invalid numeric env {name}={raw!r}; using default {default}")
+        return default
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.info(f"Invalid numeric env {name}={raw!r}; using default {default}")
+        return default
+
+
+def task_bool(task_data: dict[str, Any] | None, key: str, env_name: str, default: bool) -> bool:
+    if task_data and key in task_data:
+        raw = task_data.get(key)
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in {"1", "true", "yes", "on", "y"}
+    return env_bool(env_name, default)
+
+
+def task_float(task_data: dict[str, Any] | None, key: str, env_name: str, default: float) -> float:
+    if task_data and key in task_data:
+        try:
+            return float(task_data[key])
+        except (TypeError, ValueError):
+            return default
+    return env_float(env_name, default)
+
+
+def task_int(task_data: dict[str, Any] | None, key: str, env_name: str, default: int) -> int:
+    if task_data and key in task_data:
+        try:
+            return int(task_data[key])
+        except (TypeError, ValueError):
+            return default
+    return env_int(env_name, default)
 
 
 def normalize_prompt_text(text: str) -> str:
@@ -184,9 +240,17 @@ async def fill_textbox_with_validation(page, textbox_loc, text: str, worker_id: 
         await human_delay(0.5, 1.0)
 
         await page.keyboard.press("Control+A")
-        await human_delay(0.2, 0.6)
-        await page.keyboard.insert_text(text)
-        await human_delay(0.6, 1.2)
+        await human_delay(0.15, 0.35)
+        if env_bool("FLOW_VIDEO_PROMPT_CTRL_V", True):
+            try:
+                await page.evaluate("text => navigator.clipboard.writeText(text)", text)
+                await human_delay(0.1, 0.25)
+                await page.keyboard.press("Control+V")
+            except Exception:
+                await page.keyboard.insert_text(text)
+        else:
+            await page.keyboard.insert_text(text)
+        await human_delay(0.5, 1.0)
 
         current_text = await get_textbox_content(textbox_loc)
         if current_text == text:
@@ -221,6 +285,29 @@ async def human_scroll(page) -> None:
     if random.random() < 0.3:
         await page.mouse.wheel(0, -random.randint(50, 200))
         await human_delay(0.1, 0.3)
+
+
+async def human_idle_activity(
+    page,
+    worker_id: Any,
+    phase: str,
+    *,
+    min_sec: float = 1.0,
+    max_sec: float = 3.0,
+    min_actions: int = 1,
+    max_actions: int = 3,
+    allow_scroll: bool = True,
+) -> None:
+    """Run a short safe idle sequence: pause, mouse movement, and light scrolling."""
+    action_count = random.randint(max(1, min_actions), max(max_actions, min_actions))
+    logger.info(f"{_lp(worker_id)} {phase} human idle activity x{action_count}")
+    await human_delay(min_sec, max_sec)
+    for _ in range(action_count):
+        if allow_scroll and random.random() < 0.35:
+            await human_scroll(page)
+        else:
+            await human_mouse_move(page)
+        await human_delay(0.4, 1.4)
 
 
 async def human_click(page, locator_or_element, timeout: int = 5000) -> None:
@@ -1354,8 +1441,26 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
         """
         deadline = monotonic() + timeout_ms / 1000
         last_statuses: dict[str, str] = {}
+        last_idle_activity_at = 0.0
 
         while monotonic() < deadline:
+            if env_bool("FLOW_VIDEO_HUMAN_DURING_GENERATION", False):
+                now = monotonic()
+                min_interval = env_float("FLOW_VIDEO_GENERATION_ACTIVITY_MIN_INTERVAL_SEC", 90.0)
+                probability = env_float("FLOW_VIDEO_GENERATION_ACTIVITY_PROBABILITY", 0.20)
+                if now - last_idle_activity_at >= min_interval and random.random() < probability:
+                    await human_idle_activity(
+                        page,
+                        worker_id,
+                        "generation-wait",
+                        min_sec=env_float("FLOW_VIDEO_GENERATION_IDLE_MIN_SEC", 0.6),
+                        max_sec=env_float("FLOW_VIDEO_GENERATION_IDLE_MAX_SEC", 1.5),
+                        min_actions=env_int("FLOW_VIDEO_GENERATION_MIN_ACTIONS", 1),
+                        max_actions=env_int("FLOW_VIDEO_GENERATION_MAX_ACTIONS", 1),
+                        allow_scroll=False,
+                    )
+                    last_idle_activity_at = monotonic()
+
             remaining_ms = max(1000, int((deadline - monotonic()) * 1000))
             async with page.expect_response(
                 lambda r: (
@@ -1633,7 +1738,19 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
         textbox_loc = page.locator('[role="textbox"]')
         await fill_textbox_with_validation(page, textbox_loc, input_prompt, worker.worker_id)
-        await human_delay(1.0, 2.5)
+        if task_bool(task_data, "human_after_prompt", "FLOW_VIDEO_HUMAN_AFTER_PROMPT", True):
+            await human_idle_activity(
+                page,
+                worker.worker_id,
+                "after-prompt",
+                min_sec=task_float(task_data, "human_after_prompt_min_sec", "FLOW_VIDEO_AFTER_PROMPT_MIN_SEC", 2.0),
+                max_sec=task_float(task_data, "human_after_prompt_max_sec", "FLOW_VIDEO_AFTER_PROMPT_MAX_SEC", 4.0),
+                min_actions=task_int(task_data, "human_after_prompt_min_actions", "FLOW_VIDEO_AFTER_PROMPT_MIN_ACTIONS", 1),
+                max_actions=task_int(task_data, "human_after_prompt_max_actions", "FLOW_VIDEO_AFTER_PROMPT_MAX_ACTIONS", 1),
+                allow_scroll=False,
+            )
+        else:
+            await human_delay(1.0, 2.5)
 
     async def _submit_video_generation_humanized(self, page, worker_id: Any, is_frame_mode: bool = False, log_prefix: str = "") -> tuple[str, dict[str, Any]]:
         """
