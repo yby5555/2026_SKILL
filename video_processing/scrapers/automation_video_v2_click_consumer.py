@@ -1497,23 +1497,13 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
         logger.info(f"{_lp(worker.worker_id)} 等待并点击新建项目...")
         try:
-            await wait_for_flow_home_ready(page, worker.worker_id)
-            new_btn = await find_new_project_button(page)
-            if not new_btn:
-                logger.info(f"{_lp(worker.worker_id)} 未找到新建项目按钮，刷新 Flow 首页重试一次")
-                await _log_page_diagnostics(page, worker.worker_id, "new_project_missing_before_reload")
-                await page.goto(FLOW_HOME_URL, wait_until="domcontentloaded", timeout=30000)
-                await human_delay(3.0, 5.0)
-                await wait_for_flow_home_ready(page, worker.worker_id)
-                new_btn = await find_new_project_button(page)
-
-            if not new_btn:
-                await _log_page_diagnostics(page, worker.worker_id, "new_project_missing_after_reload")
-                raise RuntimeError("超时未找到'新建项目/New project'按钮，页面可能未加载完成、登录态异常或进入风控页")
-
-            await human_delay(1.0, 2.0)
-            await human_click(page, new_btn)
-            await human_delay(2.0, 4.0)
+            new_btn = page.locator('button:has-text("新建项目")')
+            if await new_btn.is_visible(timeout=5000):
+                await human_delay(1.0, 2.0)
+                await human_click(page, new_btn)
+                await human_delay(2.0, 4.0)
+            else:
+                raise RuntimeError("超时未找到'新建项目'按钮，页面可能未加载完成")
         except Exception as exc:
             raise RuntimeError(f"点击'新建项目'失败: {exc}")
 
@@ -1718,30 +1708,6 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
             try:
                 response = await asyncio.wait_for(submit_response_future, timeout=60)
-                try:
-                    request_headers = dict(getattr(response.request, "headers", {}) or {})
-                    observed_headers = {
-                        "user-agent": request_headers.get("user-agent") or request_headers.get("User-Agent"),
-                        "sec-ch-ua": request_headers.get("sec-ch-ua") or request_headers.get("Sec-Ch-Ua"),
-                        "sec-ch-ua-full-version-list": (
-                            request_headers.get("sec-ch-ua-full-version-list")
-                            or request_headers.get("Sec-Ch-Ua-Full-Version-List")
-                        ),
-                        "sec-ch-ua-platform": (
-                            request_headers.get("sec-ch-ua-platform")
-                            or request_headers.get("Sec-Ch-Ua-Platform")
-                        ),
-                        "accept-language": (
-                            request_headers.get("accept-language")
-                            or request_headers.get("Accept-Language")
-                        ),
-                    }
-                    logger.info(
-                        f"{lp} submit_request_headers="
-                        f"{json.dumps(observed_headers, ensure_ascii=False)}"
-                    )
-                except Exception as exc:
-                    logger.info(f"{lp} submit_request_headers_failed={exc}")
                 payload = await response.json()
                 if "error" in payload:
                     compact_payload = json.dumps(payload, ensure_ascii=False)[:2000]
@@ -1793,8 +1759,8 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
         try:
             logger.info(f"{log_prefix} 正在访问 Flow 首页...")
             await page.goto(FLOW_HOME_URL, wait_until="domcontentloaded")
-            await wait_for_flow_home_ready(page, worker.worker_id)
-            await _log_browser_identity(page, log_prefix, self.user_agent)
+            # await wait_for_flow_home_ready(page, worker.worker_id)
+            # await _log_browser_identity(page, log_prefix, self.user_agent)
             await human_delay(5, 7)
             await human_mouse_move(page)
 

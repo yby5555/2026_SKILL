@@ -299,7 +299,8 @@ class BrowserWorker:
             page = await context.new_page()
             page.set_default_navigation_timeout(self.navigation_timeout_ms)
             page.set_default_timeout(self.navigation_timeout_ms)
-            await self._stealth.apply_stealth_async(page)
+            # 默认不再对页面注入 playwright_stealth，避免改写 webdriver /
+            # plugins / UA-CH 等浏览器指纹；需要旧行为时显式设置环境变量。
             await self._initialize_page_hook(page, task_data, worker_context)
             return await self._process_task(page, task_data, worker_context)
         finally:

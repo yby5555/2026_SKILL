@@ -42,6 +42,16 @@ logger = get_logger("RedisTaskVideoConsumer")
 
 from account_mgr.cos_utils import download_cos_image, is_cos_url
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid integer env {name}={raw!r}") from exc
+
 MAX_RETRIES = DEFAULT_MAX_RETRIES  # 单个任务最大重试次数
 REDIS_BLOCK_TIMEOUT_SECONDS = 5  # Redis 阻塞等待新任务的超时秒数
 DOWNLOAD_TIMEOUT_SECONDS = 300  # 文件下载超时秒数（5分钟）
@@ -49,11 +59,11 @@ DEFAULT_TASK_PRIORITY = 10  # 新任务插入时的默认优先级分值
 RETRY_PRIORITY_STEP = 10  # 每次重试时优先级分值的递增步长，分值越高越晚被消费
 SCORE_TIME_FACTOR = 10**13  # 时间戳转分值所用的除数因子（13位毫秒级 → 约4位分值）
 MAX_TIMESTAMP_MS = 9_999_999_999_999  # 13位毫秒时间戳的最大合法值，用于分值逆序计算
-BROWSER_POOL_SIZE = 2  # 浏览器实例池大小
-CONTEXTS_PER_BROWSER = 2  # 每个浏览器实例下的并发上下文数
+BROWSER_POOL_SIZE = max(1, _env_int("FLOW_CONSUMER_BROWSER_POOL_SIZE", 1))  # ????????
+CONTEXTS_PER_BROWSER = max(1, _env_int("FLOW_CONSUMER_CONTEXTS_PER_BROWSER", 1))  # ???????????????
 CONSUMER_WORKERS = BROWSER_POOL_SIZE * CONTEXTS_PER_BROWSER  # 消费者工作协程总数
-COOLDOWN_MIN_SEC = 5  # 任务间冷却最小秒数
-COOLDOWN_MAX_SEC = 10  # 任务间冷却最大秒数
+COOLDOWN_MIN_SEC = max(0, _env_int("FLOW_CONSUMER_COOLDOWN_MIN_SEC", 8))  # ?????????
+COOLDOWN_MAX_SEC = max(COOLDOWN_MIN_SEC, _env_int("FLOW_CONSUMER_COOLDOWN_MAX_SEC", 15))  # ?????????
 
 
 
@@ -84,8 +94,9 @@ def _resolve_consumer_extra_flags(headless: bool) -> list[str]:
     configured = os.getenv("FLOW_CONSUMER_EXTRA_FLAGS", "").strip()
     if configured:
         flags.extend(part.strip() for part in configured.split(",") if part.strip())
-    if headless and not any(flag.startswith("--headless") for flag in flags):
-        flags.append("--headless=new")
+    locale = resolve_flow_locale().split(",", 1)[0]
+    if locale and not any(flag.startswith("--lang=") for flag in flags):
+        flags.append(f"--lang={locale}")
     if not headless:
         flags = [flag for flag in flags if not flag.startswith("--headless")]
     return flags
@@ -189,30 +200,46 @@ def extract_error_message(exc: Exception, fallback: str = "采集异常") -> str
     return fallback
 
 
+
+def _update_task_document(
+    collection: Any,
+    task_id: str,
+    update: dict[str, Any],
+    *,
+    upsert: bool = False,
+    attempts: int = 3,
+    required: bool = False,
+) -> bool:
+    """Update Mongo with retries; transient DB errors must not waste a video-generation attempt."""
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            collection.update_one({"_id": task_id}, update, upsert=upsert)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                f"[??:{task_id}] Mongo update failed ({attempt}/{attempts}, required={required}): {exc}"
+            )
+            time.sleep(min(2 * attempt, 8))
+    if required and last_exc is not None:
+        raise last_exc
+    return False
+
 def mark_task_processing(collection: Any, task: dict[str, Any]) -> None:
-    """
-    在数据库中标记任务为处理中。
-
-    此函数在 MongoDB 中将任务状态更新为"processing"，
-    表示该任务正在处理中。
-
-    参数:
-        collection: MongoDB 集合对象
-        task: 包含至少 "_id" 字段的任务字典
-
-    示例:
-        mark_task_processing(mongo_collection, {"_id": "task123"})
-    """
+    """??????????????Mongo ???????????"""
     task_id = str(task.get("_id", ""))
-    collection.update_one(
-        {"_id": task_id},
+    _update_task_document(
+        collection,
+        task_id,
         {
             "$set": {
-                "msg": "执行中",
+                "msg": "???",
                 "task_status": "processing",
                 "updated_at": now_local(),
             },
         },
+        required=False,
     )
 
 
@@ -262,39 +289,33 @@ def upsert_task_generation_result(
     if mime is not None:
         update_fields["mime"] = mime
 
-    collection.update_one(
-        {"_id": task_id},
+    _update_task_document(
+        collection,
+        task_id,
         {"$set": update_fields},
         upsert=True,
+        attempts=5,
+        required=False,
     )
 
 
 def mark_task_failed(collection: Any, task: dict[str, Any], error_message: str) -> None:
-    """
-    在数据库中标记任务为失败。
-
-    此函数在 MongoDB 中将任务状态更新为"failed"并记录错误消息。
-
-    参数:
-        collection: MongoDB 集合对象
-        task: 包含至少 "_id" 字段的任务字典
-        error_message: 错误消息描述
-
-    示例:
-        mark_task_failed(mongo_collection, {"_id": "task123"}, "网络连接失败")
-    """
+    """????????????Mongo ?????????????????"""
     task_id = str(task.get("_id", ""))
-    collection.update_one(
-        {"_id": task_id},
+    _update_task_document(
+        collection,
+        task_id,
         {
             "$set": {
-                "msg": "失败",
+                "msg": "??",
                 "task_status": "failed",
                 "error_msg": error_message,
                 "updated_at": now_local(),
             },
         },
         upsert=True,
+        attempts=5,
+        required=False,
     )
 
 
@@ -600,6 +621,8 @@ async def consume_forever() -> None:
         extra_flags=_resolve_consumer_extra_flags(headless),
         viewport=viewport,
         task_timeout_ms=4 * 60 * 1000,
+        # locale="zh-CN",
+        # timezone_id="Asia/Shanghai",
     )
 
     logger.info(

@@ -331,8 +331,8 @@ class MultiBrowserScraperBase:
         default_cookie_domain: str = ".tiktok.com",
         default_proxy: str | dict[str, Any] | None = None,
         solve_cloudflare: bool = False,
-        block_webrtc: bool = True,
-        hide_canvas: bool = True,
+        block_webrtc: bool = False,
+        hide_canvas: bool = False,
         enable_context_stealth_script: bool | None = None,
         recycle_browser_after_tasks: int | None = 200,
         recycle_browser_after_failures: int | None = 5,
@@ -372,9 +372,9 @@ class MultiBrowserScraperBase:
             solve_cloudflare:
                 是否启用 Cloudflare 绕过能力。
             block_webrtc:
-                是否屏蔽 WebRTC。
+                是否屏蔽 WebRTC。默认 False，尽量保持浏览器原始行为。
             hide_canvas:
-                是否隐藏 Canvas 指纹。
+                是否隐藏 Canvas 指纹。默认 False，尽量保持浏览器原始行为。
             recycle_browser_after_tasks:
                 单个 worker 执行多少任务后请求回收浏览器。
             recycle_browser_after_failures:
@@ -400,14 +400,9 @@ class MultiBrowserScraperBase:
         self.solve_cloudflare = solve_cloudflare
         self.block_webrtc = block_webrtc
         self.hide_canvas = hide_canvas
-        if enable_context_stealth_script is None:
-            enable_context_stealth_script = os.getenv("FLOW_ENABLE_CONTEXT_STEALTH_SCRIPT", "").lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-        self.enable_context_stealth_script = bool(enable_context_stealth_script)
+        # 已按当前流程要求停用自定义 realistic_stealth_init_script，避免覆盖
+        # navigator / userAgentData / plugins 等指纹。
+        self.enable_context_stealth_script = False
 
         self._workers: list[BrowserWorker] = []
         self._pool_condition = asyncio.Condition()
@@ -602,18 +597,12 @@ class MultiBrowserScraperBase:
         """
         del worker
         proxy_settings = construct_proxy_dict(proxy) if proxy else None
-        options: dict[str, Any] = {
-            "locale": self.locale,
-            "timezone_id": self.timezone_id,
-            "user_agent": self.user_agent,
-            "extra_http_headers": {
-                "Accept-Language": f"{self.locale},{self.locale.split('-', 1)[0]};q=0.9,en;q=0.8",
-                "Sec-Ch-Ua": _build_sec_ch_ua(self.user_agent),
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-                "Upgrade-Insecure-Requests": "1",
-            },
-        }
+        options: dict[str, Any] = {}
+        # 语言和时区：有传参就使用传参；未传时使用 __init__ 默认值。
+        if self.locale:
+            options["locale"] = self.locale
+        if self.timezone_id:
+            options["timezone_id"] = self.timezone_id
 
         # 只有在 viewport 宽度和高度都大于 0 时才设置视口
         if self.viewport and self.viewport.get('width', 0) > 0 and self.viewport.get('height', 0) > 0:
@@ -651,8 +640,7 @@ class MultiBrowserScraperBase:
                 处理后的浏览器上下文。
         """
         del task_data, worker
-        if self.enable_context_stealth_script:
-            await context.add_init_script(realistic_stealth_init_script(self.user_agent))
+        # 不注入 realistic_stealth_init_script，保持浏览器原始指纹。
         return context
 
     async def initialize_page(
