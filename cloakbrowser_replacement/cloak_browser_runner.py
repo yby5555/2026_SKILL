@@ -30,22 +30,40 @@ TaskHandler = Callable[[Any, dict[str, Any]], Awaitable[Any]]
 
 @dataclass(slots=True)
 class CloakBrowserRunnerConfig:
-    """Launch-only config; CloakBrowser owns browser fingerprint defaults."""
+    """CloakBrowser 启动/上下文配置。浏览器指纹优先交给 CloakBrowser 处理。"""
 
+    # 是否无头运行：False 显示窗口，True 后台无窗口。
     headless: bool = False
+    # 是否启用 CloakBrowser humanize 行为层。
     humanize: bool = True
+    # humanize 预设：default 较快，careful 更慢更谨慎。
     human_preset: str = "careful"
+    # 是否使用 CloakBrowser 默认 stealth 参数。
     stealth_args: bool = True
+    # 浏览器进程级代理：整个 browser 内的 context 共用。
     default_proxy: str | dict[str, Any] | None = None
+    # 根据代理出口自动匹配 timezone/locale/WebRTC IP。
     geoip: bool = False
+    # Playwright 后端：None/playwright 为默认，patchright 只建议实验。
     backend: str | None = None
+    # 启动级 timezone，交给 CloakBrowser 指纹参数。
     timezone: str | None = None
+    # 启动级 locale/lang，交给 CloakBrowser 指纹参数。
     locale: str | None = None
+    # 固定 fingerprint seed：相同 seed 表现为同一台设备。
     fingerprint_seed: int | str | None = None
+    # 额外 Chromium 参数，仅用于明确实验。
     extra_args: tuple[str, ...] = ()
+    # 持久化 profile 目录；设置后不是无痕/无痕模式。
     persistent_profile_dir: str | Path | None = None
+    # 持久化模式下是否注入任务 cookie。
     inject_cookies_into_persistent_profile: bool = True
+    # True=持久化 profile；False=临时隔离 context。
     use_persistent_context: bool = False
+    # context 级代理：无痕/new_context 模式下可以每个 context 不同。
+    context_proxy: str | dict[str, Any] | None = None
+    # 浏览器被关闭或崩溃后，下个任务前自动重启。
+    restart_on_disconnect: bool = True
 
 
 def safe_slug(value: str, default: str = "profile") -> str:
@@ -136,6 +154,28 @@ class CloakBrowserRunner:
             finally:
                 self.browser = None
 
+    def is_connected(self) -> bool:
+        if self.persistent_context is not None:
+            try:
+                browser = self.persistent_context.browser
+                return bool(browser and browser.is_connected())
+            except Exception:
+                return False
+        if self.browser is not None:
+            try:
+                return bool(self.browser.is_connected())
+            except Exception:
+                return False
+        return False
+
+    async def ensure_started(self) -> None:
+        if self.browser is None and self.persistent_context is None:
+            await self.start()
+            return
+        if self.config.restart_on_disconnect and not self.is_connected():
+            await self.close()
+            await self.start()
+
     async def run_task(
         self,
         task_data: dict[str, Any],
@@ -144,7 +184,7 @@ class CloakBrowserRunner:
         initialize_context: ContextHook | None = None,
         initialize_page: PageHook | None = None,
     ) -> Any:
-        await self.start()
+        await self.ensure_started()
         if self.browser is None and self.persistent_context is None:
             raise RuntimeError("CloakBrowserRunner failed to start browser")
 
@@ -161,10 +201,13 @@ class CloakBrowserRunner:
                 await context.add_cookies(cookies_payload)
         else:
             owns_context = True
+            context_options: dict[str, Any] = {}
+            context_proxy = task_data.get("context_proxy") or self.config.context_proxy
+            if context_proxy:
+                context_options["proxy"] = {"server": context_proxy} if isinstance(context_proxy, str) else context_proxy
             if cookies_payload:
-                context = await self.browser.new_context(storage_state={"cookies": cookies_payload})
-            else:
-                context = await self.browser.new_context()
+                context_options["storage_state"] = {"cookies": cookies_payload}
+            context = await self.browser.new_context(**context_options)
         page = None
         try:
             if initialize_context:

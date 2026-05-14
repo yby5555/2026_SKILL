@@ -99,31 +99,50 @@ def resolve_identity(task: dict[str, Any]) -> str:
 
 
 def build_runner_config(task: dict[str, Any], *, suffix: str = "") -> CloakBrowserRunnerConfig:
+    # identity 用来生成稳定 fingerprint seed/profile 目录；优先取账号信息。
     identity = resolve_identity(task)
+
+    # CLOAK_VIDEO_FINGERPRINT_SEED：手动指定固定指纹 seed。
+    # 未指定且 CLOAK_VIDEO_STABLE_FINGERPRINT=true 时，根据 identity 自动生成。
     seed = env_int_optional("CLOAK_VIDEO_FINGERPRINT_SEED")
     if seed is None and env_bool("CLOAK_VIDEO_STABLE_FINGERPRINT", True):
         seed = stable_fingerprint_seed(identity)
 
-    persistent_enabled = env_bool("CLOAK_VIDEO_PERSISTENT_PROFILE", True)
+    # CLOAK_VIDEO_PERSISTENT_PROFILE=false：默认使用临时隔离 context，cookie 互相隔离。
+    # 设为 true 时才使用 persistent profile，保存 cookies/localStorage/cache。
+    persistent_enabled = env_bool("CLOAK_VIDEO_PERSISTENT_PROFILE", False)
     profile_dir = env_optional("CLOAK_VIDEO_PROFILE_DIR")
     if persistent_enabled and not profile_dir:
         profile_dir = str(profile_dir_for_identity(PROFILE_BASE_DIR, identity, suffix=suffix))
 
     return CloakBrowserRunnerConfig(
+        # CLOAK_VIDEO_HEADLESS：是否无头运行。
         headless=env_bool("CLOAK_VIDEO_HEADLESS", False),
+        # CLOAK_VIDEO_HUMANIZE / CLOAK_VIDEO_HUMAN_PRESET：CloakBrowser 自带行为模拟。
         humanize=env_bool("CLOAK_VIDEO_HUMANIZE", True),
         human_preset=os.getenv("CLOAK_VIDEO_HUMAN_PRESET", "careful").strip() or "careful",
+        # CLOAK_VIDEO_STEALTH_ARGS：是否使用 CloakBrowser 默认指纹参数。
         stealth_args=env_bool("CLOAK_VIDEO_STEALTH_ARGS", True),
+        # CLOAK_VIDEO_PROXY：浏览器进程级代理，所有 context 共用。
         default_proxy=env_optional("CLOAK_VIDEO_PROXY"),
+        # CLOAK_VIDEO_CONTEXT_PROXY：无痕 context 级代理。
+        context_proxy=env_optional("CLOAK_VIDEO_CONTEXT_PROXY"),
+        # CLOAK_VIDEO_GEOIP：根据代理出口推导 timezone/locale/WebRTC IP。
         geoip=env_bool("CLOAK_VIDEO_GEOIP", False),
+        # CLOAK_VIDEO_BACKEND：可选 patchright/playwright。
         backend=env_optional("CLOAK_VIDEO_BACKEND"),
+        # 启动级 timezone/locale，不走旧 context_options。
         timezone=env_optional("CLOAK_VIDEO_TIMEZONE"),
         locale=env_optional("CLOAK_VIDEO_LOCALE"),
         fingerprint_seed=seed,
+        # CLOAK_VIDEO_EXTRA_ARGS：额外 Chromium 参数，多个用逗号分隔。
         extra_args=env_extra_args(),
         persistent_profile_dir=profile_dir,
         use_persistent_context=persistent_enabled,
+        # persistent 模式下是否注入 cookie；无痕模式不受影响。
         inject_cookies_into_persistent_profile=env_bool("CLOAK_VIDEO_INJECT_COOKIES", True),
+        # 浏览器被关/崩溃后，下个任务前自动重启。
+        restart_on_disconnect=env_bool("CLOAK_VIDEO_RESTART_ON_DISCONNECT", True),
     )
 
 
@@ -306,6 +325,8 @@ async def run_one_task() -> dict[str, Any]:
             "inject_cookies_into_persistent_profile": runner_config.inject_cookies_into_persistent_profile,
             "extra_args": list(runner_config.extra_args),
             "proxy_configured": bool(runner_config.default_proxy),
+            "context_proxy_configured": bool(runner_config.context_proxy),
+            "restart_on_disconnect": runner_config.restart_on_disconnect,
         },
         "cloakbrowser": get_cloakbrowser_status(),
         "execution": execution,

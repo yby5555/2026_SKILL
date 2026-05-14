@@ -44,20 +44,39 @@ ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts" / "audit40_cloak"
 ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# Defaults used when running by right-click / without CLI arguments.
-# Edit these values directly if you want different local behavior.
-DEFAULT_HEADLESS = True
+# 右键运行/不传 CLI 参数时使用这些默认值；想调速度/并发优先改这里。
+# 是否无头运行：True=后台无窗口；False=显示窗口。
+DEFAULT_HEADLESS = False
+# 是否只跑需要传图片的任务。
 DEFAULT_IMAGE_ONLY = True
-DEFAULT_BROWSER_POOL_SIZE = 1
-DEFAULT_CONTEXTS_PER_BROWSER = 2
+# 浏览器进程数量。
+DEFAULT_BROWSER_POOL_SIZE = 2
+# 每个浏览器里开的隔离 context/window 数。
+DEFAULT_CONTEXTS_PER_BROWSER = 1
+# 单个 context 跑完一个任务后的冷却秒数。
 DEFAULT_COOLDOWN_SECONDS = 8.0
-DEFAULT_LIMIT = 0  # 0 means all selected tasks; with DEFAULT_IMAGE_ONLY=True this is 32 tasks.
+# 限制任务数；0 表示跑所选全部任务。
+DEFAULT_LIMIT = 0
+# 视频生成轮询超时。
 DEFAULT_POLL_TIMEOUT_MS = 6 * 60 * 1000
+# 单个任务整体超时。
 DEFAULT_TASK_TIMEOUT_MS = 9 * 60 * 1000
+# 是否开启 CloakBrowser humanize 行为层。
 DEFAULT_HUMANIZE = True
+# humanize 预设：default 较快；careful 更慢更稳。
 DEFAULT_HUMAN_PRESET = "careful"
+# 各 context 启动错峰秒数。
 DEFAULT_STAGGER_SECONDS = 8.0
-
+# True=使用临时隔离 context，cookie/localStorage 隔离。
+DEFAULT_INCOGNITO_CONTEXTS = True
+# True=同一 browser 里开多个隔离 context。
+DEFAULT_SHARED_BROWSER_CONTEXTS = True
+# profile 模式：incognito=临时隔离 context；fixed=固定用户目录 persistent profile。
+DEFAULT_PROFILE_MODE = "fixed"
+# 固定用户目录根目录；fixed 模式且未指定 --profile-dir 时自动分子目录。
+DEFAULT_PROFILE_BASE_DIR = str(Path(__file__).resolve().parent / "profiles")
+# DEFAULT_PROFILE_MODE = "fixed"
+# DEFAULT_PROFILE_BASE_DIR = r"D:\2026_SKILL\cloakbrowser_replacement\profiles"
 
 def image_file_to_data_uri(path: Path) -> str:
     mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
@@ -107,7 +126,53 @@ def runner_config_report(config: CloakBrowserRunnerConfig) -> dict[str, Any]:
         "inject_cookies_into_persistent_profile": config.inject_cookies_into_persistent_profile,
         "extra_args": list(config.extra_args),
         "proxy_configured": bool(config.default_proxy),
+        "context_proxy_configured": bool(config.context_proxy),
+        "restart_on_disconnect": config.restart_on_disconnect,
     }
+
+
+def load_context_proxy_map(raw: str) -> dict[int, str]:
+    """Parse a simple context proxy map: "0=socks5://a,1=http://b"."""
+    result: dict[int, str] = {}
+    for part in (raw or "").split(","):
+        item = part.strip()
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        try:
+            result[int(key.strip())] = value.strip()
+        except ValueError:
+            continue
+    return result
+
+
+def resolve_context_proxy(args: argparse.Namespace, context_id: int) -> str:
+    proxy_map = load_context_proxy_map(args.context_proxy_map)
+    if context_id in proxy_map:
+        return proxy_map[context_id]
+    if args.context_proxy:
+        return args.context_proxy
+    return ""
+
+
+def apply_profile_args(config: CloakBrowserRunnerConfig, args: argparse.Namespace, suffix: str) -> None:
+    """根据 --profile-mode/--profile-dir 参数覆盖 runner 的 profile 行为。"""
+    if args.profile_mode == "incognito":
+        config.use_persistent_context = False
+        config.persistent_profile_dir = None
+        return
+
+    if args.profile_mode == "fixed":
+        config.use_persistent_context = True
+        if args.profile_dir:
+            # 明确指定 --profile-dir 时，直接使用这个固定用户目录。
+            config.persistent_profile_dir = Path(args.profile_dir)
+        else:
+            # 未指定 --profile-dir 时，在 --profile-base-dir 下按 browser/context 自动分目录，避免多个 worker 抢同一个 profile。
+            config.persistent_profile_dir = Path(args.profile_base_dir) / suffix
+        return
+
+    raise ValueError(f"不支持的 profile_mode: {args.profile_mode}")
 
 
 async def run_one_with_cloak(
@@ -118,6 +183,7 @@ async def run_one_with_cloak(
     total: int,
     worker_id: int,
     context_id: int,
+    context_proxy: str = "",
 ) -> dict[str, Any]:
     task = dict(spec.queue_payload)
     task_id, _ = validate_video_task(task)
@@ -126,6 +192,8 @@ async def run_one_with_cloak(
     raw_cookies = load_cookies(normalized_task.get("cookies"), default_domain=".google.com")
     filtered_cookies, dropped_cookies = filter_flow_cookies(raw_cookies)
     normalized_task["cookies"] = filtered_cookies
+    if context_proxy:
+        normalized_task["context_proxy"] = context_proxy
     worker = ProbeWorkerContext(worker_id=worker_id, context_id=context_id)
     failure_prefix = ARTIFACT_DIR / f"{task_id}.failure"
 
@@ -148,7 +216,7 @@ async def run_one_with_cloak(
                 "ok": False,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
-                "error_msg": str(exc) or "????",
+                "error_msg": str(exc) or "unknown_error",
                 "traceback": traceback.format_exc(),
                 "failure_screenshot": screenshot,
                 "failure_html": html,
@@ -219,6 +287,7 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
     base_runner_config.headless = args.headless
     base_runner_config.humanize = not args.no_humanize
     base_runner_config.human_preset = args.human_preset
+    apply_profile_args(base_runner_config, args, "base")
 
 
     results: list[dict[str, Any]] = []
@@ -239,6 +308,12 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "browser_pool_size": args.browser_pool_size,
             "contexts_per_browser": args.contexts_per_browser,
             "concurrency": args.browser_pool_size * args.contexts_per_browser,
+            "incognito_contexts": args.incognito_contexts,
+            "shared_browser_contexts": args.shared_browser_contexts,
+            "effective_shared_browser_contexts": args.shared_browser_contexts and args.profile_mode != "fixed",
+            "profile_mode": args.profile_mode,
+            "profile_dir": args.profile_dir,
+            "profile_base_dir": args.profile_base_dir,
             "limit": args.limit,
             "image_only": args.image_only,
             "cloakbrowser": get_cloakbrowser_status(),
@@ -252,49 +327,71 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             encoding="utf-8",
         )
 
-    async def worker_loop(worker_id: int, context_id: int) -> None:
+    async def context_loop(runner: CloakBrowserRunner, worker_id: int, context_id: int) -> None:
         if args.stagger_seconds > 0:
             await asyncio.sleep((worker_id - 1 + context_id) * args.stagger_seconds)
+        context_proxy = resolve_context_proxy(args, context_id)
+        while True:
+            item = await queue.get()
+            if item is None:
+                queue.task_done()
+                return
+            index, spec = item
+            try:
+                row = await run_one_with_cloak(
+                    runner,
+                    scraper,
+                    spec,
+                    index,
+                    len(specs),
+                    worker_id,
+                    context_id,
+                    context_proxy,
+                )
+                async with result_lock:
+                    results.append(row)
+                    results.sort(key=lambda row: int(row.get("index", 0)))
+                    await write_partial_report()
+            finally:
+                queue.task_done()
+                if args.cooldown_seconds > 0:
+                    await asyncio.sleep(args.cooldown_seconds)
+
+    def make_worker_config(browser_id: int, *, context_id: int | None = None) -> CloakBrowserRunnerConfig:
+        suffix = f"b{browser_id}" if context_id is None else f"b{browser_id}-c{context_id}"
         worker_config = build_runner_config(
             {"_id": run_id, "email": "audit40"},
-            suffix=f"b{worker_id}-c{context_id}",
+            suffix=suffix,
         )
         worker_config.headless = args.headless
         worker_config.humanize = not args.no_humanize
         worker_config.human_preset = args.human_preset
-        async with CloakBrowserRunner(worker_config) as runner:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    queue.task_done()
-                    return
-                index, spec = item
-                try:
-                    row = await run_one_with_cloak(
-                        runner,
-                        scraper,
-                        spec,
-                        index,
-                        len(specs),
-                        worker_id,
-                        context_id,
-                    )
-                    async with result_lock:
-                        results.append(row)
-                        results.sort(key=lambda row: int(row.get("index", 0)))
-                        await write_partial_report()
-                finally:
-                    queue.task_done()
-                    if args.cooldown_seconds > 0:
-                        await asyncio.sleep(args.cooldown_seconds)
+        apply_profile_args(worker_config, args, suffix)
+        return worker_config
+
+    async def browser_loop(browser_id: int) -> None:
+        async with CloakBrowserRunner(make_worker_config(browser_id)) as runner:
+            context_tasks = [
+                asyncio.create_task(context_loop(runner, browser_id, context_index))
+                for context_index in range(args.contexts_per_browser)
+            ]
+            await asyncio.gather(*context_tasks)
+
+    async def standalone_context_loop(browser_id: int, context_id: int) -> None:
+        async with CloakBrowserRunner(make_worker_config(browser_id, context_id=context_id)) as runner:
+            await context_loop(runner, browser_id, context_id)
 
     concurrency = args.browser_pool_size * args.contexts_per_browser
-    workers = [
-        asyncio.create_task(worker_loop(browser_index + 1, context_index))
-        for browser_index in range(args.browser_pool_size)
-        for context_index in range(args.contexts_per_browser)
-    ]
-    for _ in workers:
+    shared_browser_contexts = args.shared_browser_contexts and args.profile_mode != "fixed"
+    if shared_browser_contexts:
+        workers = [asyncio.create_task(browser_loop(browser_index + 1)) for browser_index in range(args.browser_pool_size)]
+    else:
+        workers = [
+            asyncio.create_task(standalone_context_loop(browser_index + 1, context_index))
+            for browser_index in range(args.browser_pool_size)
+            for context_index in range(args.contexts_per_browser)
+        ]
+    for _ in range(concurrency):
         queue.put_nowait(None)
     await queue.join()
     await asyncio.gather(*workers)
@@ -307,6 +404,12 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "browser_pool_size": args.browser_pool_size,
         "contexts_per_browser": args.contexts_per_browser,
         "concurrency": args.browser_pool_size * args.contexts_per_browser,
+        "incognito_contexts": args.incognito_contexts,
+        "shared_browser_contexts": args.shared_browser_contexts,
+        "effective_shared_browser_contexts": args.shared_browser_contexts and args.profile_mode != "fixed",
+        "profile_mode": args.profile_mode,
+        "profile_dir": args.profile_dir,
+        "profile_base_dir": args.profile_base_dir,
         "limit": args.limit,
         "image_only": args.image_only,
         "cloakbrowser": get_cloakbrowser_status(),
@@ -327,21 +430,28 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run run_40_task_audit task matrix with CloakBrowser runner")
-    parser.add_argument("--run-id", default="")
-    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=DEFAULT_HEADLESS)
-    parser.add_argument("--no-humanize", action="store_true", default=not DEFAULT_HUMANIZE)
-    parser.add_argument("--human-preset", default=DEFAULT_HUMAN_PRESET, choices=["default", "careful"])
-    parser.add_argument("--poll-timeout-ms", type=int, default=DEFAULT_POLL_TIMEOUT_MS)
-    parser.add_argument("--task-timeout-ms", type=int, default=DEFAULT_TASK_TIMEOUT_MS)
-    parser.add_argument("--cooldown-seconds", type=float, default=DEFAULT_COOLDOWN_SECONDS)
-    parser.add_argument("--stagger-seconds", type=float, default=DEFAULT_STAGGER_SECONDS)
-    parser.add_argument("--browser-pool-size", type=int, default=DEFAULT_BROWSER_POOL_SIZE)
-    parser.add_argument("--contexts-per-browser", type=int, default=DEFAULT_CONTEXTS_PER_BROWSER)
-    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="For smoke testing; 0 means all selected tasks")
-    parser.add_argument("--image-only", action=argparse.BooleanOptionalAction, default=DEFAULT_IMAGE_ONLY, help="Only run tasks that require images (exclude text family)")
-    parser.add_argument("--image-file-a", default=str(SAMPLE_IMAGE_A))
-    parser.add_argument("--image-file-b", default=str(SAMPLE_IMAGE_B))
+    parser = argparse.ArgumentParser(description="使用 CloakBrowser 跑 run_40_task_audit 任务矩阵")
+    parser.add_argument("--run-id", default="", help="本次运行 ID；空则自动使用时间戳")
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=DEFAULT_HEADLESS, help="是否无头运行；--no-headless 会显示浏览器窗口")
+    parser.add_argument("--no-humanize", action="store_true", default=not DEFAULT_HUMANIZE, help="关闭 CloakBrowser humanize 行为层")
+    parser.add_argument("--human-preset", default=DEFAULT_HUMAN_PRESET, choices=["default", "careful"], help="humanize 预设：default 较快，careful 较慢")
+    parser.add_argument("--poll-timeout-ms", type=int, default=DEFAULT_POLL_TIMEOUT_MS, help="视频生成状态轮询超时毫秒")
+    parser.add_argument("--task-timeout-ms", type=int, default=DEFAULT_TASK_TIMEOUT_MS, help="单个任务整体超时毫秒")
+    parser.add_argument("--cooldown-seconds", type=float, default=DEFAULT_COOLDOWN_SECONDS, help="每个 context 完成任务后的冷却秒数")
+    parser.add_argument("--stagger-seconds", type=float, default=DEFAULT_STAGGER_SECONDS, help="多个 context 启动错峰秒数")
+    parser.add_argument("--incognito-contexts", action=argparse.BooleanOptionalAction, default=DEFAULT_INCOGNITO_CONTEXTS, help="使用临时隔离 context；cookie/localStorage 隔离")
+    parser.add_argument("--shared-browser-contexts", action=argparse.BooleanOptionalAction, default=DEFAULT_SHARED_BROWSER_CONTEXTS, help="同一 browser 内开多个隔离 context")
+    parser.add_argument("--profile-mode", choices=["incognito", "fixed"], default=os.getenv("CLOAK_VIDEO_PROFILE_MODE", DEFAULT_PROFILE_MODE), help="profile 模式：incognito=临时隔离 context；fixed=固定用户目录")
+    parser.add_argument("--profile-dir", default=os.getenv("CLOAK_VIDEO_PROFILE_DIR", ""), help="固定用户目录。仅 --profile-mode fixed 时生效；指定后使用该目录")
+    parser.add_argument("--profile-base-dir", default=os.getenv("CLOAK_VIDEO_PROFILE_BASE_DIR", DEFAULT_PROFILE_BASE_DIR), help="固定用户目录根目录。fixed 模式且未指定 --profile-dir 时自动分子目录")
+    parser.add_argument("--context-proxy", default=os.getenv("CLOAK_VIDEO_CONTEXT_PROXY", ""), help="所有无痕 context 使用同一代理")
+    parser.add_argument("--context-proxy-map", default=os.getenv("CLOAK_VIDEO_CONTEXT_PROXY_MAP", ""), help="按 context_id 设置代理，例如 0=socks5://a:1,1=http://b:2")
+    parser.add_argument("--browser-pool-size", type=int, default=DEFAULT_BROWSER_POOL_SIZE, help="浏览器进程数量")
+    parser.add_argument("--contexts-per-browser", type=int, default=DEFAULT_CONTEXTS_PER_BROWSER, help="每个浏览器内的并发 context 数")
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="限制任务数；0 表示所选全部")
+    parser.add_argument("--image-only", action=argparse.BooleanOptionalAction, default=DEFAULT_IMAGE_ONLY, help="只跑需要传图片的任务")
+    parser.add_argument("--image-file-a", default=str(SAMPLE_IMAGE_A), help="第一张样例图片")
+    parser.add_argument("--image-file-b", default=str(SAMPLE_IMAGE_B), help="第二张样例图片")
     return parser.parse_args()
 
 
