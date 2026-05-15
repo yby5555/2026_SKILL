@@ -16,11 +16,12 @@ from __future__ import annotations
 
 常用环境变量：
 
-    CLOAK_CONSUMER_BROWSER_POOL_SIZE=2
+    CLOAK_CONSUMER_BROWSER_POOL_SIZE=4
     CLOAK_CONSUMER_CONTEXTS_PER_BROWSER=1
     CLOAK_CONSUMER_PROFILE_MODE=fixed
     CLOAK_CONSUMER_PROFILE_BASE_DIR=D:\2026_SKILL\cloakbrowser_replacement\profiles
-    CLOAK_CONSUMER_HEADLESS=false
+    CLOAK_CONSUMER_RANDOMIZE_BROWSER_IDENTITY=true
+    CLOAK_CONSUMER_HEADLESS=true
 """
 
 import asyncio
@@ -173,7 +174,7 @@ def _parse_context_proxy_map(raw: str) -> dict[int, str]:
 # 默认尽量贴近 run_40_task_audit_cloak.py 当前稳定设置。
 BROWSER_POOL_SIZE = max(
     1,
-    _get_int_env("CLOAK_CONSUMER_BROWSER_POOL_SIZE", "FLOW_CONSUMER_BROWSER_POOL_SIZE", default=2),
+    _get_int_env("CLOAK_CONSUMER_BROWSER_POOL_SIZE", "FLOW_CONSUMER_BROWSER_POOL_SIZE", default=4),
 )
 CONTEXTS_PER_BROWSER = max(
     1,
@@ -181,8 +182,8 @@ CONTEXTS_PER_BROWSER = max(
 )
 CONSUMER_WORKERS = BROWSER_POOL_SIZE * CONTEXTS_PER_BROWSER
 
-# True=显示浏览器窗口，False=后台无窗口；默认显示窗口，和稳定审计脚本一致。
-HEADLESS = _get_bool_env("CLOAK_CONSUMER_HEADLESS", "CLOAK_VIDEO_HEADLESS", default=False)
+# True=后台无窗口，False=显示浏览器窗口；默认和 run_40_task_audit_cloak.py 一致。
+HEADLESS = _get_bool_env("CLOAK_CONSUMER_HEADLESS", "CLOAK_VIDEO_HEADLESS", default=True)
 
 # CloakBrowser humanize 行为层，默认开启 careful。
 HUMANIZE = _get_bool_env("CLOAK_CONSUMER_HUMANIZE", "CLOAK_VIDEO_HUMANIZE", default=True)
@@ -197,12 +198,21 @@ PROFILE_BASE_DIR = _get_str_env(
     default=str(CLOAK_REPLACEMENT_DIR / "profiles"),
 )
 
-# worker=和 run_40_task_audit_cloak.py 一样，每个 worker 一个固定目录；
+# worker=和 run_40_task_audit_cloak.py 一样，每个 browser/context 一个 runner；
+# 随机身份开启时，每次 start/restart 会再切到新的 profile 子目录。
 # account=每个任务按当前账号目录启动独立浏览器，隔离更强但速度更慢。
 PROFILE_SCOPE = _get_str_env("CLOAK_CONSUMER_PROFILE_SCOPE", default="worker").lower()
 
 # incognito 模式下可以共用一个 browser 开多个隔离 context；fixed 模式会自动禁用共享，避免抢 profile。
 SHARED_BROWSER_CONTEXTS = _get_bool_env("CLOAK_CONSUMER_SHARED_BROWSER_CONTEXTS", default=True)
+
+# 和 run_40_task_audit_cloak.py 一致：每次浏览器真正打开/断线重启时刷新 fingerprint_seed；
+# fixed profile 模式下同时切换到新的 profile 子目录。
+RANDOMIZE_BROWSER_IDENTITY = _get_bool_env(
+    "CLOAK_CONSUMER_RANDOMIZE_BROWSER_IDENTITY",
+    "CLOAK_VIDEO_RANDOMIZE_BROWSER_IDENTITY",
+    default=True,
+)
 
 # 每个 context/worker 启动错峰秒数，减少同时打开/提交。
 STAGGER_SECONDS = max(0.0, _get_float_env("CLOAK_CONSUMER_STAGGER_SECONDS", default=8.0))
@@ -225,6 +235,91 @@ RESTART_ON_DISCONNECT = _get_bool_env(
 ROTATE_PROFILE_ON_CONSECUTIVE_403 = _get_bool_env("CLOAK_CONSUMER_ROTATE_PROFILE_ON_403", default=True)
 CONSECUTIVE_403_ROTATE_THRESHOLD = max(1, _get_int_env("CLOAK_CONSUMER_403_ROTATE_THRESHOLD", default=3))
 ROTATE_PROFILE_COOLDOWN_SECONDS = max(0.0, _get_float_env("CLOAK_CONSUMER_403_ROTATE_COOLDOWN_SECONDS", default=30.0))
+
+
+class RotatingIdentityCloakBrowserRunner(CloakBrowserRunner):
+    """保持和 run_40_task_audit_cloak.py 一样的浏览器身份刷新逻辑。
+
+    每次浏览器真正 start() 前都会刷新两类身份：
+    1. fingerprint_seed：写入 CloakBrowser 的 --fingerprint 参数。
+    2. persistent_profile_dir：fixed profile 模式下切到一个新的用户目录子目录。
+
+    CloakBrowserRunner.ensure_started() 在浏览器断线时会 close() + start()，
+    所以重写 start() 后，首次打开和断线重启都会自动换身份。
+    """
+
+    def __init__(
+        self,
+        config: CloakBrowserRunnerConfig,
+        *,
+        enabled: bool,
+        run_id: str,
+        suffix: str,
+        profile_mode: str,
+        profile_dir: str,
+        profile_base_dir: str,
+        identity_events: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(config)
+        self._enabled = enabled
+        self._run_id = run_id
+        self._suffix = suffix
+        self._profile_mode = profile_mode
+        self._profile_dir = profile_dir
+        self._profile_base_dir = profile_base_dir
+        self._identity_events = identity_events
+        self._launch_counter = 0
+
+    def _next_profile_base_dir(self) -> Path:
+        """返回随机用户目录父目录；显式 profile_dir 和审计脚本一样被当作父目录使用。"""
+        if self._profile_dir:
+            return Path(self._profile_dir)
+        return Path(self._profile_base_dir)
+
+    def _apply_new_browser_identity(self) -> None:
+        """生成并应用本次浏览器启动使用的随机指纹和用户目录。"""
+        self._launch_counter += 1
+        fingerprint_seed = random.randint(1, 0x7FFFFFFF)
+        launch_token = safe_slug(
+            f"{self._run_id}-{self._suffix}-l{self._launch_counter}-{int(time.time() * 1000)}-{fingerprint_seed}"
+        )
+
+        self.config.fingerprint_seed = fingerprint_seed
+        profile_dir = ""
+        if self._profile_mode == "fixed":
+            profile_path = self._next_profile_base_dir() / launch_token
+            self.config.use_persistent_context = True
+            self.config.persistent_profile_dir = profile_path
+            profile_dir = str(profile_path)
+
+        event = {
+            "run_id": self._run_id,
+            "suffix": self._suffix,
+            "launch_counter": self._launch_counter,
+            "fingerprint_seed": fingerprint_seed,
+            "profile_mode": self._profile_mode,
+            "persistent_profile_dir": profile_dir,
+            "created_at": now_local().isoformat(),
+        }
+        self._identity_events.append(event)
+        message = (
+            "[browser_identity] "
+            f"suffix={self._suffix} launch={self._launch_counter} "
+            f"fingerprint_seed={fingerprint_seed} profile_dir={profile_dir or '<incognito>'}"
+        )
+        logger.info(message)
+        try:
+            print(message, flush=True)
+        except Exception:
+            pass
+
+    async def start(self) -> None:
+        """首次打开/断线重启前刷新身份；已启动时不重复刷新。"""
+        if self.browser is not None or self.persistent_context is not None:
+            return
+        if self._enabled:
+            self._apply_new_browser_identity()
+        await super().start()
 
 
 @dataclass(slots=True)
@@ -287,21 +382,26 @@ async def _rotate_runner_profile_after_403(
         return
 
     health.profile_rotation += 1
-    new_profile_dir = _rotated_profile_dir(health.suffix, health.profile_rotation)
     logger.warning(
         f"[{worker_name}] 连续 403 达到 {CONSECUTIVE_403_ROTATE_THRESHOLD} 次，"
-        f"关闭浏览器并切换到新用户目录: {new_profile_dir}"
+        "关闭浏览器并按 audit 脚本模式重新打开"
     )
     await runner.close()
-    runner.config.persistent_profile_dir = new_profile_dir
-    runner.config.fingerprint_seed = random.randint(1, 0x7FFFFFFF)
+
+    # 默认由 RotatingIdentityCloakBrowserRunner.start() 生成新 profile + 新 fingerprint；
+    # 如果显式关闭随机身份，则保留旧的 403 轮换兜底逻辑。
+    if not RANDOMIZE_BROWSER_IDENTITY:
+        new_profile_dir = _rotated_profile_dir(health.suffix, health.profile_rotation)
+        runner.config.persistent_profile_dir = new_profile_dir
+        runner.config.fingerprint_seed = random.randint(1, 0x7FFFFFFF)
+
     health.consecutive_403 = 0
     if ROTATE_PROFILE_COOLDOWN_SECONDS > 0:
         logger.info(f"[{worker_name}] 403 换目录后冷却 {ROTATE_PROFILE_COOLDOWN_SECONDS:.1f}s")
         await asyncio.sleep(ROTATE_PROFILE_COOLDOWN_SECONDS)
     await runner.start()
     logger.info(
-        f"[{worker_name}] 新用户目录浏览器已启动: {new_profile_dir}, "
+        f"[{worker_name}] 403 后浏览器已重新启动: {runner.config.persistent_profile_dir}, "
         f"fingerprint_seed={runner.config.fingerprint_seed}"
     )
 
@@ -335,7 +435,8 @@ def _apply_consumer_runner_overrides(
         # 明确指定固定目录时，使用该目录；多 worker 时建议不要共用同一个目录。
         config.persistent_profile_dir = Path(PROFILE_DIR)
     else:
-        # 默认和 run_40_task_audit_cloak.py 一样：按 worker/context 自动分目录。
+        # start 前的基础目录；随机身份开启后会被 RotatingIdentityCloakBrowserRunner
+        # 覆盖成 run_id/suffix/launch/fingerprint 组成的新子目录。
         config.persistent_profile_dir = Path(PROFILE_BASE_DIR) / suffix
 
 
@@ -452,6 +553,8 @@ async def _run_one_account_scoped(
     collection: Any,
     task: dict[str, Any],
     *,
+    consumer_run_id: str,
+    identity_events: list[dict[str, Any]],
     worker_id: int,
     context_id: int,
     context_proxy: str,
@@ -466,14 +569,23 @@ async def _run_one_account_scoped(
     task_identity = str(task_with_identity.get("email") or task_with_identity.get("_id") or "account")
     suffix = f"b{worker_id}-c{context_id}"
     runner_config = _make_runner_config(
-        run_identity="redis-consumer-cloak",
+        run_identity=consumer_run_id,
         suffix=suffix,
         task_identity=task_identity,
     )
     if context_proxy:
         runner_config.context_proxy = context_proxy
 
-    async with CloakBrowserRunner(runner_config) as runner:
+    async with RotatingIdentityCloakBrowserRunner(
+        runner_config,
+        enabled=RANDOMIZE_BROWSER_IDENTITY,
+        run_id=consumer_run_id,
+        suffix=suffix,
+        profile_mode=PROFILE_MODE,
+        profile_dir=PROFILE_DIR,
+        profile_base_dir=PROFILE_BASE_DIR,
+        identity_events=identity_events,
+    ) as runner:
         return await run_one_with_cloak(
             runner,
             scraper,
@@ -487,6 +599,8 @@ async def _run_one_account_scoped(
 
 async def consumer_context_loop(
     *,
+    consumer_run_id: str,
+    identity_events: list[dict[str, Any]],
     worker_name: str,
     worker_id: int,
     context_id: int,
@@ -524,6 +638,8 @@ async def consumer_context_loop(
                     scraper,
                     task_collection,
                     task,
+                    consumer_run_id=consumer_run_id,
+                    identity_events=identity_events,
                     worker_id=worker_id,
                     context_id=context_id,
                     context_proxy=context_proxy,
@@ -600,6 +716,8 @@ async def consume_forever() -> None:
     redis_client = create_redis_client()
     task_collection = create_task_collection()
     recovered = _recover_processing_queue(redis_client)
+    consumer_run_id = time.strftime("%Y%m%d-%H%M%S")
+    browser_identity_events: list[dict[str, Any]] = []
 
     scraper = GoogleFlowVideoScraperV2(
         browser_pool_size=BROWSER_POOL_SIZE,
@@ -614,9 +732,11 @@ async def consume_forever() -> None:
         f"browser_pool_size={BROWSER_POOL_SIZE}, "
         f"contexts_per_browser={CONTEXTS_PER_BROWSER}, "
         f"concurrent_workers={CONSUMER_WORKERS}, "
+        f"consumer_run_id={consumer_run_id}, "
         f"profile_mode={PROFILE_MODE}, profile_scope={PROFILE_SCOPE}, "
         f"shared_browser_contexts={SHARED_BROWSER_CONTEXTS and PROFILE_MODE != 'fixed'}, "
         f"headless={HEADLESS}, humanize={HUMANIZE}, human_preset={HUMAN_PRESET}, "
+        f"randomize_browser_identity={RANDOMIZE_BROWSER_IDENTITY}, "
         f"rotate_profile_on_403={ROTATE_PROFILE_ON_CONSECUTIVE_403}, "
         f"consecutive_403_threshold={CONSECUTIVE_403_ROTATE_THRESHOLD}, "
         f"recovered_processing={recovered}, cloakbrowser={json.dumps(get_cloakbrowser_status(), ensure_ascii=False)}"
@@ -625,14 +745,37 @@ async def consume_forever() -> None:
     shared_browser_contexts = SHARED_BROWSER_CONTEXTS and PROFILE_MODE != "fixed"
     account_scoped = PROFILE_MODE == "fixed" and PROFILE_SCOPE == "account"
 
+    def worker_suffix(browser_id: int, *, context_id: int | None = None) -> str:
+        """生成 browser/context 后缀，和 run_40_task_audit_cloak.py 保持一致。"""
+        return f"b{browser_id}" if context_id is None else f"b{browser_id}-c{context_id}"
+
+    def make_runner(browser_id: int, *, context_id: int | None = None) -> RotatingIdentityCloakBrowserRunner:
+        """创建 audit 模式 runner：每次 start/restart 随机指纹，fixed 模式随机 profile 子目录。"""
+        suffix = worker_suffix(browser_id, context_id=context_id)
+        runner_label = f"B{browser_id}" if context_id is None else f"B{browser_id}:C{context_id}"
+        runner_config = _make_runner_config(run_identity=consumer_run_id, suffix=suffix)
+        logger.info(
+            f"[{runner_label}] "
+            f"runner_config_before_start={json.dumps(_redacted_runner_config(runner_config), ensure_ascii=False)}"
+        )
+        return RotatingIdentityCloakBrowserRunner(
+            runner_config,
+            enabled=RANDOMIZE_BROWSER_IDENTITY,
+            run_id=consumer_run_id,
+            suffix=suffix,
+            profile_mode=PROFILE_MODE,
+            profile_dir=PROFILE_DIR,
+            profile_base_dir=PROFILE_BASE_DIR,
+            identity_events=browser_identity_events,
+        )
+
     async def browser_loop(browser_id: int) -> None:
-        suffix = f"b{browser_id}"
-        runner_config = _make_runner_config(run_identity="redis-consumer-cloak", suffix=suffix)
-        logger.info(f"[B{browser_id}] runner_config={json.dumps(_redacted_runner_config(runner_config), ensure_ascii=False)}")
-        async with CloakBrowserRunner(runner_config) as runner:
+        async with make_runner(browser_id) as runner:
             context_tasks = [
                 asyncio.create_task(
                     consumer_context_loop(
+                        consumer_run_id=consumer_run_id,
+                        identity_events=browser_identity_events,
                         worker_name=f"cloak-b{browser_id}-c{context_index}",
                         worker_id=browser_id,
                         context_id=context_index,
@@ -648,9 +791,11 @@ async def consume_forever() -> None:
             await asyncio.gather(*context_tasks)
 
     async def standalone_context_loop(browser_id: int, context_id: int) -> None:
-        suffix = f"b{browser_id}-c{context_id}"
+        suffix = worker_suffix(browser_id, context_id=context_id)
         if account_scoped:
             await consumer_context_loop(
+                consumer_run_id=consumer_run_id,
+                identity_events=browser_identity_events,
                 worker_name=f"cloak-b{browser_id}-c{context_id}",
                 worker_id=browser_id,
                 context_id=context_id,
@@ -662,11 +807,11 @@ async def consume_forever() -> None:
             )
             return
 
-        runner_config = _make_runner_config(run_identity="redis-consumer-cloak", suffix=suffix)
-        logger.info(f"[B{browser_id}:C{context_id}] runner_config={json.dumps(_redacted_runner_config(runner_config), ensure_ascii=False)}")
-        async with CloakBrowserRunner(runner_config) as runner:
+        async with make_runner(browser_id, context_id=context_id) as runner:
             health = BrowserHealthState(suffix=suffix)
             await consumer_context_loop(
+                consumer_run_id=consumer_run_id,
+                identity_events=browser_identity_events,
                 worker_name=f"cloak-b{browser_id}-c{context_id}",
                 worker_id=browser_id,
                 context_id=context_id,

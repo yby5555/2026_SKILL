@@ -14,6 +14,7 @@ import base64
 import json
 import mimetypes
 import os
+import random
 import sys
 import time
 import traceback
@@ -29,7 +30,7 @@ CLOAKBROWSER_REPO = Path(os.getenv("CLOAKBROWSER_REPO", r"D:\CloakBrowser"))
 if CLOAKBROWSER_REPO.exists() and str(CLOAKBROWSER_REPO) not in sys.path:
     sys.path.insert(0, str(CLOAKBROWSER_REPO))
 
-from cloak_browser_runner import CloakBrowserRunner, CloakBrowserRunnerConfig, get_cloakbrowser_status  # noqa: E402
+from cloak_browser_runner import CloakBrowserRunner, CloakBrowserRunnerConfig, get_cloakbrowser_status, safe_slug  # noqa: E402
 from driver_base.multi_browser_scraper_base import load_cookies  # noqa: E402
 from video_processing.consumers.run_40_task_audit import (  # noqa: E402
     SAMPLE_IMAGE_A,
@@ -46,11 +47,11 @@ ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 右键运行/不传 CLI 参数时使用这些默认值；想调速度/并发优先改这里。
 # 是否无头运行：True=后台无窗口；False=显示窗口。
-DEFAULT_HEADLESS = False
+DEFAULT_HEADLESS = True
 # 是否只跑需要传图片的任务。
 DEFAULT_IMAGE_ONLY = True
 # 浏览器进程数量。
-DEFAULT_BROWSER_POOL_SIZE = 1
+DEFAULT_BROWSER_POOL_SIZE = 4
 # 每个浏览器里开的隔离 context/window 数。
 DEFAULT_CONTEXTS_PER_BROWSER = 1
 # 单个 context 跑完一个任务后的冷却秒数。
@@ -75,8 +76,90 @@ DEFAULT_SHARED_BROWSER_CONTEXTS = True
 DEFAULT_PROFILE_MODE = "fixed"
 # 固定用户目录根目录；fixed 模式且未指定 --profile-dir 时自动分子目录。
 DEFAULT_PROFILE_BASE_DIR = str(Path(__file__).resolve().parent / "profiles")
+# True=每次浏览器打开/断线重启时都换 fingerprint_seed；fixed profile 模式下也换新的用户目录子目录。
+DEFAULT_RANDOMIZE_BROWSER_IDENTITY = True
 # DEFAULT_PROFILE_MODE = "fixed"
 # DEFAULT_PROFILE_BASE_DIR = r"D:\2026_SKILL\cloakbrowser_replacement\profiles"
+
+
+class RotatingIdentityCloakBrowserRunner(CloakBrowserRunner):
+    """在每次浏览器真正启动前刷新浏览器身份。
+
+    这里的“浏览器身份”包含两部分：
+    1. fingerprint_seed：传给 CloakBrowser 的 --fingerprint 参数，影响浏览器指纹。
+    2. persistent_profile_dir：fixed profile 模式下的用户目录，影响 cookie/localStorage/cache 等本地状态。
+
+    CloakBrowserRunner.ensure_started() 在浏览器断开后会调用 close() + start()，
+    所以只要重写 start()，首次打开和断线重启都会自动换一套身份。
+    """
+
+    def __init__(
+        self,
+        config: CloakBrowserRunnerConfig,
+        *,
+        enabled: bool,
+        run_id: str,
+        suffix: str,
+        profile_mode: str,
+        profile_dir: str,
+        profile_base_dir: str,
+        identity_events: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(config)
+        self._enabled = enabled
+        self._run_id = run_id
+        self._suffix = suffix
+        self._profile_mode = profile_mode
+        self._profile_dir = profile_dir
+        self._profile_base_dir = profile_base_dir
+        self._identity_events = identity_events
+        self._launch_counter = 0
+
+    def _next_profile_base_dir(self) -> Path:
+        """返回随机用户目录的父目录；显式 --profile-dir 会被当作父目录使用。"""
+        if self._profile_dir:
+            return Path(self._profile_dir)
+        return Path(self._profile_base_dir)
+
+    def _apply_new_browser_identity(self) -> None:
+        """生成并应用本次浏览器启动使用的随机指纹和用户目录。"""
+        self._launch_counter += 1
+        fingerprint_seed = random.randint(1, 0x7FFFFFFF)
+        launch_token = safe_slug(
+            f"{self._run_id}-{self._suffix}-l{self._launch_counter}-{int(time.time() * 1000)}-{fingerprint_seed}"
+        )
+
+        self.config.fingerprint_seed = fingerprint_seed
+        profile_dir = ""
+        if self._profile_mode == "fixed":
+            profile_path = self._next_profile_base_dir() / launch_token
+            self.config.use_persistent_context = True
+            self.config.persistent_profile_dir = profile_path
+            profile_dir = str(profile_path)
+
+        event = {
+            "run_id": self._run_id,
+            "suffix": self._suffix,
+            "launch_counter": self._launch_counter,
+            "fingerprint_seed": fingerprint_seed,
+            "profile_mode": self._profile_mode,
+            "persistent_profile_dir": profile_dir,
+            "created_at": now_local().isoformat(),
+        }
+        self._identity_events.append(event)
+        print(
+            "[browser_identity] "
+            f"suffix={self._suffix} launch={self._launch_counter} "
+            f"fingerprint_seed={fingerprint_seed} profile_dir={profile_dir or '<incognito>'}"
+        )
+
+    async def start(self) -> None:
+        """首次打开/断线重启前刷新身份；已启动时不重复刷新。"""
+        if self.browser is not None or self.persistent_context is not None:
+            return
+        if self._enabled:
+            self._apply_new_browser_identity()
+        await super().start()
 
 def image_file_to_data_uri(path: Path) -> str:
     mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
@@ -298,6 +381,7 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         queue.put_nowait((index, spec))
 
     started_at = now_local().isoformat()
+    browser_identity_events: list[dict[str, Any]] = []
 
     async def write_partial_report() -> None:
         partial_report = {
@@ -314,6 +398,8 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "profile_mode": args.profile_mode,
             "profile_dir": args.profile_dir,
             "profile_base_dir": args.profile_base_dir,
+            "randomize_browser_identity": args.randomize_browser_identity,
+            "browser_identity_events": browser_identity_events,
             "limit": args.limit,
             "image_only": args.image_only,
             "cloakbrowser": get_cloakbrowser_status(),
@@ -357,8 +443,12 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
                 if args.cooldown_seconds > 0:
                     await asyncio.sleep(args.cooldown_seconds)
 
+    def worker_suffix(browser_id: int, *, context_id: int | None = None) -> str:
+        """生成 browser/context 对应的可读后缀，用于日志和用户目录命名。"""
+        return f"b{browser_id}" if context_id is None else f"b{browser_id}-c{context_id}"
+
     def make_worker_config(browser_id: int, *, context_id: int | None = None) -> CloakBrowserRunnerConfig:
-        suffix = f"b{browser_id}" if context_id is None else f"b{browser_id}-c{context_id}"
+        suffix = worker_suffix(browser_id, context_id=context_id)
         worker_config = build_runner_config(
             {"_id": run_id, "email": "audit40"},
             suffix=suffix,
@@ -369,8 +459,22 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         apply_profile_args(worker_config, args, suffix)
         return worker_config
 
+    def make_runner(browser_id: int, *, context_id: int | None = None) -> RotatingIdentityCloakBrowserRunner:
+        """创建 runner；默认每次 start/restart 都会随机化指纹和 fixed profile 子目录。"""
+        suffix = worker_suffix(browser_id, context_id=context_id)
+        return RotatingIdentityCloakBrowserRunner(
+            make_worker_config(browser_id, context_id=context_id),
+            enabled=args.randomize_browser_identity,
+            run_id=run_id,
+            suffix=suffix,
+            profile_mode=args.profile_mode,
+            profile_dir=args.profile_dir,
+            profile_base_dir=args.profile_base_dir,
+            identity_events=browser_identity_events,
+        )
+
     async def browser_loop(browser_id: int) -> None:
-        async with CloakBrowserRunner(make_worker_config(browser_id)) as runner:
+        async with make_runner(browser_id) as runner:
             context_tasks = [
                 asyncio.create_task(context_loop(runner, browser_id, context_index))
                 for context_index in range(args.contexts_per_browser)
@@ -378,7 +482,7 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             await asyncio.gather(*context_tasks)
 
     async def standalone_context_loop(browser_id: int, context_id: int) -> None:
-        async with CloakBrowserRunner(make_worker_config(browser_id, context_id=context_id)) as runner:
+        async with make_runner(browser_id, context_id=context_id) as runner:
             await context_loop(runner, browser_id, context_id)
 
     concurrency = args.browser_pool_size * args.contexts_per_browser
@@ -410,6 +514,8 @@ async def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "profile_mode": args.profile_mode,
         "profile_dir": args.profile_dir,
         "profile_base_dir": args.profile_base_dir,
+        "randomize_browser_identity": args.randomize_browser_identity,
+        "browser_identity_events": browser_identity_events,
         "limit": args.limit,
         "image_only": args.image_only,
         "cloakbrowser": get_cloakbrowser_status(),
@@ -444,6 +550,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-mode", choices=["incognito", "fixed"], default=os.getenv("CLOAK_VIDEO_PROFILE_MODE", DEFAULT_PROFILE_MODE), help="profile 模式：incognito=临时隔离 context；fixed=固定用户目录")
     parser.add_argument("--profile-dir", default=os.getenv("CLOAK_VIDEO_PROFILE_DIR", ""), help="固定用户目录。仅 --profile-mode fixed 时生效；指定后使用该目录")
     parser.add_argument("--profile-base-dir", default=os.getenv("CLOAK_VIDEO_PROFILE_BASE_DIR", DEFAULT_PROFILE_BASE_DIR), help="固定用户目录根目录。fixed 模式且未指定 --profile-dir 时自动分子目录")
+    parser.add_argument(
+        "--randomize-browser-identity",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_RANDOMIZE_BROWSER_IDENTITY,
+        help="每次打开/断线重启浏览器都随机 fingerprint_seed；fixed 模式下同时换新的用户目录子目录",
+    )
     parser.add_argument("--context-proxy", default=os.getenv("CLOAK_VIDEO_CONTEXT_PROXY", ""), help="所有无痕 context 使用同一代理")
     parser.add_argument("--context-proxy-map", default=os.getenv("CLOAK_VIDEO_CONTEXT_PROXY_MAP", ""), help="按 context_id 设置代理，例如 0=socks5://a:1,1=http://b:2")
     parser.add_argument("--browser-pool-size", type=int, default=DEFAULT_BROWSER_POOL_SIZE, help="浏览器进程数量")
