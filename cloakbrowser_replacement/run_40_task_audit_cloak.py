@@ -50,7 +50,7 @@ DEFAULT_HEADLESS = False
 # 是否只跑需要传图片的任务。
 DEFAULT_IMAGE_ONLY = True
 # 浏览器进程数量。
-DEFAULT_BROWSER_POOL_SIZE = 2
+DEFAULT_BROWSER_POOL_SIZE = 1
 # 每个浏览器里开的隔离 context/window 数。
 DEFAULT_CONTEXTS_PER_BROWSER = 1
 # 单个 context 跑完一个任务后的冷却秒数。

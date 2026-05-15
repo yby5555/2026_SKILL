@@ -234,7 +234,7 @@ def mark_task_processing(collection: Any, task: dict[str, Any]) -> None:
         task_id,
         {
             "$set": {
-                "msg": "???",
+                "msg": "执行中",
                 "task_status": "processing",
                 "updated_at": now_local(),
             },
@@ -307,7 +307,7 @@ def mark_task_failed(collection: Any, task: dict[str, Any], error_message: str) 
         task_id,
         {
             "$set": {
-                "msg": "??",
+                "msg": "失败",
                 "task_status": "failed",
                 "error_msg": error_message,
                 "updated_at": now_local(),

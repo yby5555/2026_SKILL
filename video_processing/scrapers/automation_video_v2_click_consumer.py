@@ -338,6 +338,108 @@ async def human_click(page, locator_or_element, timeout: int = 5000) -> None:
         await locator_or_element.click(timeout=timeout)
 
 
+def _extract_video_media_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """兼容 Flow submit/status 两种响应结构提取 media 列表。"""
+    if "result" in payload and "data" in payload["result"]:
+        media_items = payload["result"]["data"].get("media", [])
+    else:
+        media_items = payload.get("media", [])
+    return media_items if isinstance(media_items, list) else []
+
+
+async def _retry_failed_generation_from_card(
+    page,
+    worker_id: Any,
+    failed_statuses: dict[str, str],
+) -> set[str] | None:
+    """
+    Flow 后端返回 FAILED 后，尝试点击失败卡片上的“刷新/重试”按钮重新生成。
+
+    注意：失败接口返回后，前端失败卡片上的刷新按钮通常会延迟几秒才出现，
+    所以这里先等待 5-7 秒；如果找不到按钮或点击后没有新的 media name，
+    返回 None，让调用方继续走原失败流程。
+    """
+    min_wait = env_float("FLOW_VIDEO_FAILED_RETRY_BUTTON_WAIT_MIN_SEC", 10.0)
+    max_wait = env_float("FLOW_VIDEO_FAILED_RETRY_BUTTON_WAIT_MAX_SEC", 15.0)
+    if max_wait < min_wait:
+        max_wait = min_wait
+    logger.info(f"{_lp(worker_id)} 检测到生成失败 {failed_statuses}，等待 {min_wait:.0f}-{max_wait:.0f}s 查找失败卡片刷新按钮")
+    await human_delay(min_wait, max_wait)
+
+    retry_button = page.locator("button").filter(
+        has=page.locator("i.google-symbols", has_text=re.compile(r"^\s*refresh\s*$", re.IGNORECASE))
+    ).filter(
+        has=page.locator("span", has_text=re.compile(r"^\s*(重试|Retry|Try again)\s*$", re.IGNORECASE))
+    ).first
+    try:
+        if not await retry_button.is_visible(timeout=2500):
+            retry_button = page.locator("button").filter(
+                has=page.locator("i.google-symbols", has_text=re.compile(r"^\s*refresh\s*$", re.IGNORECASE))
+            ).first
+            if not await retry_button.is_visible(timeout=1500):
+                logger.info(f"{_lp(worker_id)} 未找到失败卡片刷新/重试按钮，继续按原失败流程处理")
+                return None
+    except Exception as exc:
+        logger.info(f"{_lp(worker_id)} 查找失败卡片刷新/重试按钮失败: {exc}")
+        return None
+
+    submit_response_future: asyncio.Future = asyncio.get_running_loop().create_future()
+    captured_urls: list[str] = []
+
+    def _on_response(resp) -> None:
+        if submit_response_future.done():
+            return
+        try:
+            url = resp.url
+        except Exception:
+            return
+        if any(kw in url for kw in ("batchAsyncGenerateVideo", "batchCheckAsyncVideo")):
+            captured_urls.append(f"{resp.request.method} {url} [{resp.status}]")
+        if "batchAsyncGenerateVideo" in url and resp.request.method == "POST":
+            submit_response_future.set_result(resp)
+
+    page.on("response", _on_response)
+    try:
+        logger.info(f"{_lp(worker_id)} 点击失败卡片刷新/重试按钮，尝试重新生成")
+        await human_click(page, retry_button)
+        await human_delay(0.5, 1.0)
+        try:
+            response = await asyncio.wait_for(
+                submit_response_future,
+                timeout=env_float("FLOW_VIDEO_FAILED_RETRY_SUBMIT_TIMEOUT_SEC", 60.0),
+            )
+            payload = await response.json()
+        except asyncio.TimeoutError:
+            if captured_urls:
+                logger.info(f"{_lp(worker_id)} 点击刷新后未捕获新的生成响应，期间相关请求: {captured_urls}")
+            else:
+                logger.info(f"{_lp(worker_id)} 点击刷新后未捕获任何 batchAsyncGenerate/batchCheck 请求")
+            return None
+    finally:
+        try:
+            page.remove_listener("response", _on_response)
+        except Exception:
+            pass
+
+    if "error" in payload:
+        compact_payload = json.dumps(payload, ensure_ascii=False)[:2000]
+        logger.info(f"{_lp(worker_id)} 刷新重试 API 返回 error，payload={compact_payload}")
+        return None
+
+    media_names = {
+        item.get("name")
+        for item in _extract_video_media_items(payload)
+        if item.get("name")
+    }
+    if not media_names:
+        compact_payload = json.dumps(payload, ensure_ascii=False)[:2000]
+        logger.info(f"{_lp(worker_id)} 刷新重试响应未返回 media name，payload={compact_payload}")
+        return None
+
+    logger.info(f"{_lp(worker_id)} 刷新重试已提交，新 media_names={sorted(media_names)}")
+    return media_names
+
+
 async def _log_page_diagnostics(page, worker_id: Any, reason: str) -> None:
     """记录当前页面关键状态，便于定位偶发无按钮/挑战页问题。"""
     try:
@@ -1442,6 +1544,9 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
         deadline = monotonic() + timeout_ms / 1000
         last_statuses: dict[str, str] = {}
         last_idle_activity_at = 0.0
+        failed_card_retry_attempts = 0
+        failed_card_retry_limit = env_int("FLOW_VIDEO_FAILED_CARD_RETRY_LIMIT", 1)
+        failed_card_retry_enabled = env_bool("FLOW_VIDEO_FAILED_CARD_RETRY", True)
 
         while monotonic() < deadline:
             if env_bool("FLOW_VIDEO_HUMAN_DURING_GENERATION", False):
@@ -1472,10 +1577,7 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
 
             response = await response_info.value
             payload = await response.json()
-            if "result" in payload and "data" in payload["result"]:
-                media_items = payload["result"]["data"].get("media", [])
-            else:
-                media_items = payload.get("media", [])
+            media_items = _extract_video_media_items(payload)
 
             tracked_items = [item for item in media_items if item.get("name") in media_names]
             if not tracked_items:
@@ -1492,6 +1594,25 @@ class GoogleFlowVideoScraperV2(MultiBrowserScraperBase):
             full_api_response = json.dumps(payload, ensure_ascii=False)
 
             if any(status == "MEDIA_GENERATION_STATUS_FAILED" for status in last_statuses.values()):
+                if failed_card_retry_enabled and failed_card_retry_attempts < failed_card_retry_limit:
+                    failed_card_retry_attempts += 1
+                    retry_media_names = await _retry_failed_generation_from_card(
+                        page,
+                        worker_id,
+                        last_statuses,
+                    )
+                    if retry_media_names:
+                        media_names = retry_media_names
+                        last_statuses = {}
+                        logger.info(
+                            f"{_lp(worker_id)} 失败卡片刷新重试成功触发，继续轮询新 media_names={sorted(media_names)} "
+                            f"({failed_card_retry_attempts}/{failed_card_retry_limit})"
+                        )
+                        continue
+                    logger.info(
+                        f"{_lp(worker_id)} 失败卡片刷新重试未触发新生成，继续按原失败流程处理 "
+                        f"({failed_card_retry_attempts}/{failed_card_retry_limit})"
+                    )
                 raise RuntimeError(f"视频生成失败: {last_statuses}")
 
             if media_names.issubset(last_statuses.keys()) and all(
