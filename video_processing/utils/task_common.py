@@ -105,7 +105,7 @@ def now_local() -> datetime:
         current_time = now_local()
         print(f"当前时间: {current_time}")
     """
-    return datetime.now(SHANGHAI_TZ)
+    return datetime.now()
 
 
 def create_redis_client() -> Redis:

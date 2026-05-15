@@ -294,12 +294,16 @@ async def _rotate_runner_profile_after_403(
     )
     await runner.close()
     runner.config.persistent_profile_dir = new_profile_dir
+    runner.config.fingerprint_seed = random.randint(1, 0x7FFFFFFF)
     health.consecutive_403 = 0
     if ROTATE_PROFILE_COOLDOWN_SECONDS > 0:
         logger.info(f"[{worker_name}] 403 换目录后冷却 {ROTATE_PROFILE_COOLDOWN_SECONDS:.1f}s")
         await asyncio.sleep(ROTATE_PROFILE_COOLDOWN_SECONDS)
     await runner.start()
-    logger.info(f"[{worker_name}] 新用户目录浏览器已启动: {new_profile_dir}")
+    logger.info(
+        f"[{worker_name}] 新用户目录浏览器已启动: {new_profile_dir}, "
+        f"fingerprint_seed={runner.config.fingerprint_seed}"
+    )
 
 
 def _apply_consumer_runner_overrides(
